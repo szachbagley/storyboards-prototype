@@ -26,3 +26,26 @@ export function query<T extends QueryResultRow>(
 ): Promise<QueryResult<T>> {
   return pool.query<T>(text, params as unknown[] | undefined);
 }
+
+/**
+ * Run a callback inside a single transaction, rolling back on any throw.
+ *
+ * Needed wherever a multi-statement invariant must hold: replacing a frame's
+ * concept attachments (the DELETE must land before the INSERT, or reused `ord`
+ * values collide with the unique index), and appending a frame (reading
+ * max(position) and inserting must not interleave with another append).
+ */
+export async function withTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}

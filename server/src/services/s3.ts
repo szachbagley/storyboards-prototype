@@ -20,6 +20,11 @@ export function conceptImageKey(conceptId: string): string {
   return `concepts/${conceptId}/reference.jpg`;
 }
 
+/** TECH_SPEC.md section 9: generations/{generationId}.jpg */
+export function generationImageKey(generationId: string): string {
+  return `generations/${generationId}.jpg`;
+}
+
 export async function putObject(key: string, body: Buffer, contentType: string): Promise<void> {
   await s3.send(
     new PutObjectCommand({
@@ -36,6 +41,13 @@ export function getPresignedUrl(key: string): Promise<string> {
   return getSignedUrl(s3, new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: key }), {
     expiresIn: PRESIGNED_URL_TTL_SECONDS,
   });
+}
+
+/** Read an object's bytes. Used to send a stored reference image to Gemini. */
+export async function getObjectBytes(key: string): Promise<Buffer> {
+  const result = await s3.send(new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: key }));
+  if (!result.Body) throw new Error(`S3 object ${key} has no body`);
+  return Buffer.from(await result.Body.transformToByteArray());
 }
 
 export async function deleteObject(key: string): Promise<void> {

@@ -15,6 +15,27 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     return;
   }
 
+  // body-parser failures happen before any route runs, so without this branch a
+  // malformed JSON body on any endpoint reaches the catch-all below and returns
+  // 500 for what is plainly a client error. body-parser tags them with `type`.
+  if (typeof err === "object" && err !== null && "type" in err) {
+    const { type } = err as { type?: unknown };
+    if (type === "entity.parse.failed") {
+      const body: ApiErrorBody = {
+        error: { code: "invalid_input", message: "Request body is not valid JSON" },
+      };
+      res.status(400).json(body);
+      return;
+    }
+    if (type === "entity.too.large") {
+      const body: ApiErrorBody = {
+        error: { code: "payload_too_large", message: "Request body is too large" },
+      };
+      res.status(413).json(body);
+      return;
+    }
+  }
+
   if (err instanceof ZodError) {
     const body: ApiErrorBody = {
       error: {

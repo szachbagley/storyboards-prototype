@@ -68,6 +68,12 @@ conceptsRouter.delete("/concepts/:id", async (req, res) => {
   res.status(204).end();
 });
 
+conceptsRouter.post("/concepts/:id/describe", async (req, res) => {
+  const { id } = UuidParamSchema.parse(req.params);
+  // Returns the text without persisting it -- see describeConcept.
+  res.json({ description: await concepts.describeConcept(id) });
+});
+
 conceptsRouter.post("/concepts/:id/image", uploadSingleImage, async (req, res) => {
   const { id } = UuidParamSchema.parse(req.params);
   if (!req.file) {

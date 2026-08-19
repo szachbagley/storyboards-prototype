@@ -6,7 +6,10 @@ import { createRequireAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { requestLogger } from "./middleware/requestLogger.js";
 import { conceptsRouter } from "./routes/concepts.js";
+import { framesRouter } from "./routes/frames.js";
+import { generationsRouter } from "./routes/generations.js";
 import { healthRouter } from "./routes/health.js";
+import { storiesRouter } from "./routes/stories.js";
 
 export function createApp(): express.Express {
   const app = express();
@@ -24,6 +27,9 @@ export function createApp(): express.Express {
   app.use("/api", createRequireAuth(env.APP_SECRET));
 
   app.use("/api", conceptsRouter);
+  app.use("/api", storiesRouter);
+  app.use("/api", framesRouter);
+  app.use("/api", generationsRouter);
 
   app.use((req, _res, next) => {
     next(new AppError(404, "not_found", `No route for ${req.method} ${req.path}`));

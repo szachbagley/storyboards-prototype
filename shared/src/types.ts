@@ -45,3 +45,50 @@ export interface ConceptDto {
   createdAt: string;
   updatedAt: string;
 }
+
+/** A story. coverImageUrl is the presigned URL of the FIRST frame's selected
+ * generation, where "first" means lowest position -- null when that frame has
+ * no selected generation, even if a later frame does. */
+export interface StoryDto {
+  id: string;
+  title: string;
+  coverImageUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A frame as rendered in the story grid: thumbnail and description only.
+ *
+ * There is deliberately no label or index field. TECH_SPEC.md section 5.2 is
+ * explicit that "Frame 1" / "Frame 7" are derived at render time from position
+ * order; storing one would be a second source of truth that goes stale on
+ * every reorder. */
+export interface FrameSummaryDto {
+  id: string;
+  storyId: string;
+  position: number;
+  description: string;
+  selectedGenerationId: string | null;
+  imageUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GenerationSummaryDto {
+  id: string;
+  status: GenerationStatus;
+  imageUrl: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+/** A frame as rendered in the editor. */
+export interface FrameDto extends FrameSummaryDto {
+  /** In frame_concepts.ord order. This ordering is the origin of invariant 5:
+   * it becomes the reference-image enumeration order in the compiled prompt. */
+  concepts: ConceptDto[];
+  /** Newest first (TECH_SPEC.md section 12.4). */
+  generations: GenerationSummaryDto[];
+}

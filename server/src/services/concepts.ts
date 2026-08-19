@@ -2,8 +2,10 @@ import { IMAGE_MIME_TYPE, type ConceptDto, type CreateConceptBody, type UpdateCo
 import * as db from "../db/concepts.js";
 import type { ConceptRow } from "../db/concepts.js";
 import { AppError } from "../lib/AppError.js";
+import { buildDescriptionPrompt } from "./descriptionPrompts.js";
+import { describeImage } from "./gemini.js";
 import { preprocessReferenceImage } from "./imagePreprocess.js";
-import { conceptImageKey, deleteObject, getPresignedUrl, putObject } from "./s3.js";
+import { conceptImageKey, deleteObject, getObjectBytes, getPresignedUrl, putObject } from "./s3.js";
 
 async function toDto(row: ConceptRow): Promise<ConceptDto> {
   return {
@@ -79,4 +81,37 @@ export async function setConceptImage(id: string, upload: Buffer): Promise<Conce
   const row = await db.setConceptImage(id, key, IMAGE_MIME_TYPE);
   if (!row) throw notFound(id);
   return toDto(row);
+}
+
+/**
+ * Generate a description from the concept's reference image.
+ *
+ * Deliberately does NOT persist (TECH_SPEC.md section 6). The client holds the
+ * returned draft and commits it with PATCH only on confirmation, so a
+ * hand-tuned description is never lost to a misclick (section 12.2).
+ */
+export async function describeConcept(id: string): Promise<string> {
+  const concept = await db.getConceptById(id);
+  if (!concept) throw notFound(id);
+
+  if (!concept.imageKey) {
+    // A description invented from a name would be worse than none: the
+    // compiler skill names a missing reference image as the most common cause
+    // of character drift by a wide margin.
+    throw new AppError(
+      422,
+      "no_reference_image",
+      "Upload a reference image before generating a description",
+    );
+  }
+
+  const bytes = await getObjectBytes(concept.imageKey);
+
+  // Already <= 1024px JPEG from upload preprocessing, which is the size the
+  // Gemini guidance recommends -- no further downscaling needed here.
+  return describeImage({
+    base64: bytes.toString("base64"),
+    mimeType: concept.imageMime ?? IMAGE_MIME_TYPE,
+    prompt: buildDescriptionPrompt(concept.type),
+  });
 }

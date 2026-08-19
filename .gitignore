@@ -81,6 +81,9 @@ desktop.ini
 !.vscode/settings.json
 !.vscode/extensions.json
 
+# Vercel project linkage (machine-local; contains project and org ids).
+.vercel/
+
 # ---------------------------------------------------------------------------
 # Claude Code
 #

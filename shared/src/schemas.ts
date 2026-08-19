@@ -39,3 +39,55 @@ export const UpdateConceptSchema = z
     message: "At least one field must be provided",
   });
 export type UpdateConceptBody = z.infer<typeof UpdateConceptSchema>;
+
+/** POST /stories */
+export const CreateStorySchema = z.object({
+  title: z.string().trim().min(1).max(200),
+});
+export type CreateStoryBody = z.infer<typeof CreateStorySchema>;
+
+/** PATCH /stories/:id. Title is the only field, so an empty body is always a
+ * mistake rather than a no-op -- hence required, not optional. */
+export const UpdateStorySchema = z.object({
+  title: z.string().trim().min(1).max(200),
+});
+export type UpdateStoryBody = z.infer<typeof UpdateStorySchema>;
+
+/** POST /stories/:id/frames. Appends; a frame may start with no description.
+ * The non-empty requirement is a generation-time rule, not a creation-time one. */
+export const CreateFrameSchema = z.object({
+  description: z.string().max(5000).optional(),
+});
+export type CreateFrameBody = z.infer<typeof CreateFrameSchema>;
+
+/** PATCH /frames/:id.
+ *
+ * conceptIds replaces the attachment set wholesale and its array index becomes
+ * frame_concepts.ord, which becomes the reference-image enumeration order in
+ * the compiled prompt. It is deliberately uncapped here: TECH_SPEC.md section
+ * 8.3 places the 4-character and 10-total caps on generation, not attachment.
+ *
+ * position must be finite. Postgres accepts 'NaN'::double precision without
+ * complaint and sorts it above every real value, so a NaN would silently pin a
+ * frame to the end of its story with no error and no way to reorder it back. */
+export const UpdateFrameSchema = z
+  .object({
+    description: z.string().max(5000).optional(),
+    conceptIds: z
+      .array(z.uuid())
+      .refine((ids) => new Set(ids).size === ids.length, {
+        message: "conceptIds must not contain duplicates",
+      })
+      .optional(),
+    position: z.number().finite().optional(),
+  })
+  .refine((body) => Object.keys(body).length > 0, {
+    message: "At least one field must be provided",
+  });
+export type UpdateFrameBody = z.infer<typeof UpdateFrameSchema>;
+
+/** POST /frames/:id/select-generation */
+export const SelectGenerationSchema = z.object({
+  generationId: z.uuid(),
+});
+export type SelectGenerationBody = z.infer<typeof SelectGenerationSchema>;

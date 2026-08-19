@@ -41,6 +41,13 @@ export const RATE_LIMIT_BACKOFF_MS = [2_000, 8_000] as const;
 
 export const POLL_INTERVAL_MS = 2_000;
 
+// Total budget for one /describe call, retries included, enforced with the
+// SDK's native `timeout` request option. Unlike image generation, describe is
+// synchronous from the client's perspective, so an unbounded upstream call
+// would hold the HTTP connection open. Measured latency for this model at
+// thinking_level "low" is 1.5-8.5s, so 30s is headroom rather than a hang.
+export const DESCRIBE_DEADLINE_MS = 30_000;
+
 // Longer than GENERATION_DEADLINE_MS on purpose. If the client gave up at the
 // same moment the server did, the user would see a generic client-side timeout
 // instead of the server's classified error from the TECH_SPEC.md 8.6 taxonomy.
