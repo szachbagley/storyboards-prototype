@@ -6,8 +6,8 @@ import { z } from "zod";
 loadDotenv({ path: new URL("../../.env", import.meta.url), quiet: true });
 
 // Only variables the current phase actually uses are required, so a developer
-// can boot the API without AWS or Gemini credentials. Add S3 variables here in
-// phase 2 and GEMINI_API_KEY in phase 3.
+// can boot the API without credentials it does not yet need. Add GEMINI_API_KEY
+// here in phase 3.
 //
 // Application constants (model IDs, aspect ratio, concept caps) are NOT
 // environment variables -- they live in shared/src/config.ts. See TECH_SPEC.md
@@ -21,6 +21,15 @@ const EnvSchema = z.object({
     .default("false")
     .transform((value) => value === "true"),
   APP_SECRET: z.string().min(8),
+
+  // The AWS SDK's default credential provider chain reads the two key
+  // variables from process.env itself, so they are never passed to the client
+  // explicitly. They are validated here purely to fail at boot with a clear
+  // message rather than on the first upload.
+  AWS_ACCESS_KEY_ID: z.string().min(1),
+  AWS_SECRET_ACCESS_KEY: z.string().min(1),
+  AWS_REGION: z.string().min(1),
+  S3_BUCKET: z.string().min(1),
 });
 
 const parsed = EnvSchema.safeParse(process.env);

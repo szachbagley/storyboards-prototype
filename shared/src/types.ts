@@ -29,3 +29,19 @@ export interface ApiErrorBody {
     details?: unknown;
   };
 }
+
+/** A concept as returned by the API.
+ *
+ * image_key is deliberately not exposed: it is an internal storage detail the
+ * client has no use for, and imageUrl === null already communicates "no
+ * reference image yet". imageUrl is a presigned GET valid for one hour. */
+export interface ConceptDto {
+  id: string;
+  name: string;
+  type: ConceptType;
+  description: string;
+  imageUrl: string | null;
+  imageMime: string | null;
+  createdAt: string;
+  updatedAt: string;
+}

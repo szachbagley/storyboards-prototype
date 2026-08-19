@@ -5,6 +5,7 @@ import { AppError } from "./lib/AppError.js";
 import { createRequireAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { requestLogger } from "./middleware/requestLogger.js";
+import { conceptsRouter } from "./routes/concepts.js";
 import { healthRouter } from "./routes/health.js";
 
 export function createApp(): express.Express {
@@ -22,11 +23,7 @@ export function createApp(): express.Express {
 
   app.use("/api", createRequireAuth(env.APP_SECRET));
 
-  // Temporary: proves the auth boundary is wired before any real authenticated
-  // route exists. Delete in phase 2.
-  app.get("/api/ping", (_req, res) => {
-    res.json({ ok: true });
-  });
+  app.use("/api", conceptsRouter);
 
   app.use((req, _res, next) => {
     next(new AppError(404, "not_found", `No route for ${req.method} ${req.path}`));

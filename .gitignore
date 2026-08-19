@@ -1,6 +1,90 @@
+# ---------------------------------------------------------------------------
+# Secrets
+#
+# This repo talks to three credentialed services -- Postgres, AWS S3, and the
+# Gemini API -- and every one of those secrets lives in an env file. Ignore
+# every .env variant, then re-admit the example file, which is the only one
+# that must be committed and contains no real values.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# Credential material that must never be committed, whatever it is named.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_ed25519
+*.keystore
+credentials
+.aws/
+.netrc
+
+# Some tools drop a copy of the environment next to the original.
+*.env.bak
+.env.backup
+
+# ---------------------------------------------------------------------------
+# Dependencies and build output
+# ---------------------------------------------------------------------------
 node_modules/
 dist/
+build/
 *.tsbuildinfo
-.env
-.env.local
+
+# Vite
+.vite/
+client/dist/
+
+# ---------------------------------------------------------------------------
+# Logs, caches, coverage, temporary files
+# ---------------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+coverage/
+.nyc_output/
+*.pid
+*.seed
+.cache/
+tmp/
+temp/
+
+# Scratch files from manual verification runs. Nothing in the app writes to the
+# repo, so anything matching these is a leftover probe.
+*.local
+scratch/
+scratchpad/
+
+# ---------------------------------------------------------------------------
+# Editor and OS
+# ---------------------------------------------------------------------------
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+.idea/
+*.swp
+*.swo
+*~
+
+# VS Code: keep shared project settings, drop personal ones.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# ---------------------------------------------------------------------------
+# Claude Code
+#
+# .claude/skills/ is committed on purpose -- those skills are project
+# documentation. Only machine-local settings are excluded.
+# ---------------------------------------------------------------------------
+.claude/settings.local.json
