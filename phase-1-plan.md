@@ -683,10 +683,11 @@ The fastest path for local development:
 
 ```bash
 docker run --name storyboards-pg -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=storyboards -p 5432:5432 -d postgres:17
+  -e POSTGRES_DB=storyboards -p 5433:5432 -d postgres:17
 ```
 
-Any Postgres 16+ works — Homebrew, Postgres.app, or a Railway dev database.
+Host port 5433 is used because 5432 was already occupied on the development
+machine by a non-Docker Postgres. Any Postgres 16+ works — Homebrew, Postgres.app, or a Railway dev database.
 Set `DATABASE_URL` in `server/.env` accordingly, and `DATABASE_SSL=true` only
 when pointing at Railway's external connection string.
 
@@ -798,3 +799,30 @@ attachment set wholesale must `DELETE` then `INSERT` inside one transaction —
 reusing `ord` values in the other order will collide. And `PATCH /frames/:id`
 takes `conceptIds` as an ordered array whose index becomes `ord`, which is the
 array that ultimately drives invariant 5. The ordering contract starts there.
+
+---
+
+## 10. Execution notes
+
+Recorded after execution. Where the built code differs from the plan above, the
+code is correct and this section says why.
+
+| Change | Reason |
+|---|---|
+| Postgres runs on host port **5433** | 5432 was already occupied on the development machine by a non-Docker Postgres. Reflected in 5 and `.env.example`. |
+| `middleware/auth.ts` exports **only** `createRequireAuth(secret)` | The plan also called for a bound default instance, but that requires importing `env`, whose module-level validation calls `process.exit(1)`. Importing auth would then have that as a side effect, and the unit test would depend on a configured `.env`. `app.ts` binds the factory instead. |
+| 404 fallthrough uses a pathless `app.use(...)` | Express 5 uses path-to-regexp v8, which rejects the bare `'*'` path string Express 4 accepted. |
+| `client` declares no `typescript` dependency | The Vite template pinned `~6.0.2` against the root's `^5.9.3`, which would have put two TypeScript majors in one repo. The client inherits the root compiler; verified there is exactly one `typescript` in the tree. |
+| `oxlint`, `@types/node`, and the demo assets were removed from the client template | Tooling the project did not ask for, plus an `@types/node@^24` that conflicted with the server's `^22`. |
+| Client build is `tsc --noEmit && vite build` | The template's `tsc -b` does not fit a `noEmit`, non-composite project. |
+| `npm install` was run incrementally, not once at the end | npm tolerates workspace entries pointing at directories that do not exist yet, so each workspace was verified as it landed. |
+
+Verified beyond the plan's checklist, because these behaviours are load-bearing
+for later phases:
+
+- **Migration DDL is provably identical to `TECH_SPEC.md` 5** — extracted, comment- and whitespace-normalized, and diffed rather than eyeballed.
+- **Cascade behaviour.** Deleting a story cascades to frames, attachments and generations but leaves concepts; deleting a concept detaches it while leaving frames and past generations intact; deleting a generation nulls `frames.selected_generation_id`; duplicate `(frame_id, ord)` is rejected. The concept-deletion result answers the second open question in `TECH_SPEC.md` 15.
+- **Migration rollback.** A deliberately broken migration left no partial table, was not recorded in `schema_migrations`, exited non-zero, and released the advisory lock.
+- **Database loss and recovery.** Stopping Postgres returns `503` from `/api/health`; the process survives (the `pool.on("error")` handler) and returns to `200` unaided once the database is back.
+- **Auth mutation test.** Replacing the digest comparison with a raw-buffer one makes the suite fail with `RangeError: Input buffers must have the same byte length` — the exact crash the fixed-width digests prevent.
+- **Production path.** `node dist/index.js` and `node dist/db/migrate.js` both work, confirming the `import.meta.url` migrations lookup resolves from `dist/` and not just from `src/`.

@@ -1,0 +1,29 @@
+{
+  "name": "storyboards-prototype",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "predev": "npm run build --workspace=shared",
+    "dev": "concurrently -n shared,server,client -c gray,blue,magenta \"npm:dev:shared\" \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:shared": "npm run dev --workspace=shared",
+    "dev:server": "npm run dev --workspace=server",
+    "dev:client": "npm run dev --workspace=client",
+    "build": "tsc --build && npm run build --workspace=client",
+    "typecheck": "tsc --build && tsc --noEmit -p client",
+    "test": "vitest run",
+    "migrate": "npm run migrate --workspace=server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
