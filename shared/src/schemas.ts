@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  USERNAME_MAX_LENGTH,
+  USERNAME_MIN_LENGTH,
+  USERNAME_PATTERN,
+} from "./config.js";
 import { CONCEPT_TYPES } from "./types.js";
 
 /** Route params for any `/:id` endpoint. Rejects malformed UUIDs at the
@@ -91,3 +98,48 @@ export const SelectGenerationSchema = z.object({
   generationId: z.uuid(),
 });
 export type SelectGenerationBody = z.infer<typeof SelectGenerationSchema>;
+
+// --- Identity -------------------------------------------------------------
+
+const usernameSchema = z
+  .string()
+  .trim()
+  .min(USERNAME_MIN_LENGTH)
+  .max(USERNAME_MAX_LENGTH)
+  .regex(USERNAME_PATTERN, "Use letters, numbers, underscores or hyphens only");
+
+const passwordSchema = z.string().min(MIN_PASSWORD_LENGTH).max(MAX_PASSWORD_LENGTH);
+
+// Not trimmed on the inner value beyond the edges: an API key is opaque and we
+// must not silently alter it, but pasted whitespace is a common mistake.
+const geminiKeySchema = z.string().trim().min(1).max(200);
+
+/** POST /auth/register */
+export const RegisterSchema = z.object({
+  username: usernameSchema,
+  password: passwordSchema,
+  geminiApiKey: geminiKeySchema,
+  /** Only required when the server has SIGNUP_CODE set. */
+  signupCode: z.string().optional(),
+});
+export type RegisterBody = z.infer<typeof RegisterSchema>;
+
+/** POST /auth/login. Deliberately loose: an existing account may predate any
+ *  later tightening of the username or password rules, and login must not
+ *  reject a valid credential because the policy moved. */
+export const LoginSchema = z.object({
+  username: z.string().trim().min(1).max(USERNAME_MAX_LENGTH),
+  password: z.string().min(1).max(MAX_PASSWORD_LENGTH),
+});
+export type LoginBody = z.infer<typeof LoginSchema>;
+
+/** PATCH /auth/me */
+export const UpdateMeSchema = z
+  .object({
+    password: passwordSchema.optional(),
+    geminiApiKey: geminiKeySchema.optional(),
+  })
+  .refine((body) => Object.keys(body).length > 0, {
+    message: "At least one field must be provided",
+  });
+export type UpdateMeBody = z.infer<typeof UpdateMeSchema>;

@@ -19,31 +19,31 @@ function notFound(id: string): AppError {
   return new AppError(404, "not_found", `No story with id ${id}`);
 }
 
-export async function listStories(): Promise<StoryDto[]> {
-  return Promise.all((await db.listStories()).map(toDto));
+export async function listStories(userId: string): Promise<StoryDto[]> {
+  return Promise.all((await db.listStories(userId)).map(toDto));
 }
 
-export async function getStory(id: string): Promise<StoryDto> {
-  const row = await db.getStoryById(id);
+export async function getStory(id: string, userId: string): Promise<StoryDto> {
+  const row = await db.getStoryById(id, userId);
   if (!row) throw notFound(id);
   return toDto(row);
 }
 
-export async function createStory(body: CreateStoryBody): Promise<StoryDto> {
-  return toDto(await db.insertStory(body.title));
+export async function createStory(userId: string, body: CreateStoryBody): Promise<StoryDto> {
+  return toDto(await db.insertStory(userId, body.title));
 }
 
-export async function updateStory(id: string, title: string): Promise<StoryDto> {
-  const row = await db.updateStoryTitle(id, title);
+export async function updateStory(id: string, userId: string, title: string): Promise<StoryDto> {
+  const row = await db.updateStoryTitle(id, userId, title);
   if (!row) throw notFound(id);
   return toDto(row);
 }
 
-export async function deleteStory(id: string): Promise<void> {
+export async function deleteStory(id: string, userId: string): Promise<void> {
   // Collected before the delete: frames and their generation rows cascade away.
-  const imageKeys = await generationsDb.imageKeysForStory(id);
+  const imageKeys = await generationsDb.imageKeysForStory(id, userId);
 
-  if (!(await db.deleteStory(id))) throw notFound(id);
+  if (!(await db.deleteStory(id, userId))) throw notFound(id);
 
   // Best effort -- the rows are already gone, so a failed object delete must
   // not fail the request.

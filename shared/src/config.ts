@@ -57,6 +57,28 @@ export const CLIENT_POLL_CEILING_MS = 105_000;
 export const STALE_GENERATION_AGE_MS = 5 * 60_000;
 export const SWEEP_INTERVAL_MS = 60_000;
 
+// --- Identity (see identity-plan.md) ---
+// Absolute session lifetime. No sliding expiry: re-login is cheap and an
+// absolute bound means a stolen token cannot be renewed indefinitely.
+export const SESSION_TTL_DAYS = 30;
+
+// Length over composition rules -- NIST has advised against forced character
+// classes since 2017.
+export const MIN_PASSWORD_LENGTH = 10;
+export const MAX_PASSWORD_LENGTH = 200;
+
+// Restricted charset keeps case-insensitive uniqueness meaningful: no spaces
+// and no unicode lookalikes that would read as a different account.
+export const USERNAME_MIN_LENGTH = 3;
+export const USERNAME_MAX_LENGTH = 32;
+export const USERNAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+// Per-account lockout. This exists specifically because replacing a 32-byte
+// random shared secret with a human-chosen password lowers credential entropy
+// on a publicly reachable API.
+export const MAX_LOGIN_ATTEMPTS = 10;
+export const LOGIN_LOCKOUT_MINUTES = 15;
+
 // --- Frame ordering (TECH_SPEC.md 5.2) ------------------------------------
 // Appending uses max(position) + POSITION_GAP; inserting between two frames
 // uses their midpoint, which is why position is DOUBLE PRECISION.

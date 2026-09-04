@@ -24,22 +24,36 @@ const COLUMNS = `
   updated_at AS "updatedAt"
 `;
 
+// Every read and write is scoped to the owning user. A missing `user_id`
+// predicate here does not error -- it silently exposes one account's work to
+// another -- which is why the ownership matrix in identity-plan.md 6.2 exercises
+// every endpoint rather than spot-checking.
+
 /** Newest first, so a freshly created concept appears next to the "+" tile in
- * the grid. The spec does not prescribe an order. */
-export async function listConcepts(): Promise<ConceptRow[]> {
-  const { rows } = await query<ConceptRow>(`SELECT ${COLUMNS} FROM concepts ORDER BY created_at DESC`);
+ * the grid. Matches the concepts_user_idx composite index. */
+export async function listConcepts(userId: string): Promise<ConceptRow[]> {
+  const { rows } = await query<ConceptRow>(
+    `SELECT ${COLUMNS} FROM concepts WHERE user_id = $1 ORDER BY created_at DESC`,
+    [userId],
+  );
   return rows;
 }
 
-export async function getConceptById(id: string): Promise<ConceptRow | null> {
-  const { rows } = await query<ConceptRow>(`SELECT ${COLUMNS} FROM concepts WHERE id = $1`, [id]);
+/** Returns null for another user's concept, exactly as for one that does not
+ *  exist: the caller turns both into 404, so the endpoint is not an existence
+ *  oracle. */
+export async function getConceptById(id: string, userId: string): Promise<ConceptRow | null> {
+  const { rows } = await query<ConceptRow>(
+    `SELECT ${COLUMNS} FROM concepts WHERE id = $1 AND user_id = $2`,
+    [id, userId],
+  );
   return rows[0] ?? null;
 }
 
-export async function insertConcept(name: string, type: ConceptType): Promise<ConceptRow> {
+export async function insertConcept(userId: string, name: string, type: ConceptType): Promise<ConceptRow> {
   const { rows } = await query<ConceptRow>(
-    `INSERT INTO concepts (name, type) VALUES ($1, $2) RETURNING ${COLUMNS}`,
-    [name, type],
+    `INSERT INTO concepts (user_id, name, type) VALUES ($1, $2, $3) RETURNING ${COLUMNS}`,
+    [userId, name, type],
   );
   // INSERT ... RETURNING always yields exactly one row or throws.
   return rows[0]!;
@@ -57,6 +71,7 @@ export async function insertConcept(name: string, type: ConceptType): Promise<Co
  */
 export async function updateConcept(
   id: string,
+  userId: string,
   patch: { name?: string; type?: ConceptType; description?: string },
 ): Promise<ConceptRow | null> {
   const { rows } = await query<ConceptRow>(
@@ -65,25 +80,33 @@ export async function updateConcept(
        type        = COALESCE($3::concept_type, type),
        description = COALESCE($4, description),
        updated_at  = now()
-     WHERE id = $1
+     WHERE id = $1 AND user_id = $5
      RETURNING ${COLUMNS}`,
-    [id, patch.name ?? null, patch.type ?? null, patch.description ?? null],
+    [id, patch.name ?? null, patch.type ?? null, patch.description ?? null, userId],
   );
   return rows[0] ?? null;
 }
 
-export async function setConceptImage(id: string, imageKey: string, imageMime: string): Promise<ConceptRow | null> {
+export async function setConceptImage(
+  id: string,
+  userId: string,
+  imageKey: string,
+  imageMime: string,
+): Promise<ConceptRow | null> {
   const { rows } = await query<ConceptRow>(
     `UPDATE concepts SET image_key = $2, image_mime = $3, updated_at = now()
-     WHERE id = $1 RETURNING ${COLUMNS}`,
-    [id, imageKey, imageMime],
+     WHERE id = $1 AND user_id = $4 RETURNING ${COLUMNS}`,
+    [id, imageKey, imageMime, userId],
   );
   return rows[0] ?? null;
 }
 
 /** Returns the deleted row so the caller can clean up its S3 object, or null if
  * there was nothing to delete. Attachments in frame_concepts cascade. */
-export async function deleteConcept(id: string): Promise<ConceptRow | null> {
-  const { rows } = await query<ConceptRow>(`DELETE FROM concepts WHERE id = $1 RETURNING ${COLUMNS}`, [id]);
+export async function deleteConcept(id: string, userId: string): Promise<ConceptRow | null> {
+  const { rows } = await query<ConceptRow>(
+    `DELETE FROM concepts WHERE id = $1 AND user_id = $2 RETURNING ${COLUMNS}`,
+    [id, userId],
+  );
   return rows[0] ?? null;
 }

@@ -6,7 +6,7 @@ Project guidance for Claude Code. Read `TECH_SPEC.md` for the full design; this 
 
 ## What this is
 
-A single-user storyboard generator. The user maintains a global library of **Concepts** (characters, settings, props), each with a reference image and an identity description. They write **Frames** inside **Stories**, attach concepts, and generate images via Nano Banana. The concept reference images are sent with every generation request — that is the mechanism that keeps a character looking the same across frames.
+A multi-user storyboard generator. Each account maintains its own private library of **Concepts** (characters, settings, props), each with a reference image and an identity description. They write **Frames** inside **Stories**, attach concepts, and generate images via Nano Banana. The concept reference images are sent with every generation request — that is the mechanism that keeps a character looking the same across frames.
 
 **This is a rough proof-of-concept.** Build the smallest thing that works. Do not add features, abstractions, or configuration surface that the spec does not call for.
 
@@ -91,6 +91,12 @@ Violating any of these is a bug even if the code runs.
 
 **9. Constants live in `shared/config.ts`.** `ASPECT_RATIO`, `IMAGE_SIZE`, model IDs, `MAX_CHARACTER_CONCEPTS`, `MAX_TOTAL_CONCEPTS`, `POLL_INTERVAL_MS`. These are code, not environment variables. No string literals scattered through call sites.
 
+**10. Every query touching user data filters by the authenticated user.** A missing `WHERE user_id` does not error — it silently serves one account's work to another. Ownership for frames and generations is transitive: frame → story → user. Another user's row returns `404`, never `403`, so endpoints are not existence oracles.
+
+**11. Gemini calls use the caller's key.** There is no server-wide `GEMINI_API_KEY`. `services/gemini.ts` takes an `apiKey` argument; a module-scope client would bill the wrong person and leak one user's key to another's request.
+
+**12. A user's API key is encrypted at rest and never returned.** AES-256-GCM under `ENCRYPTION_KEY`, decrypted only at the call site. No endpoint returns it — `GET /auth/me` exposes `hasGeminiKey` and a 4-character hint. It never enters `input_snapshot` or a log line.
+
 ---
 
 ## Conventions
@@ -141,11 +147,15 @@ npm run migrate --workspace=server
 
 ## Testing
 
-Minimal but non-zero. Three areas earn tests:
+Minimal but non-zero. Five areas earn tests:
 
 1. **Prompt compiler** — order matching, missing-image concepts, verbatim passthrough of the frame description.
 2. **Validation** — the 4-character and 10-total concept caps.
 3. **Position arithmetic** — append, insert-between, reorder.
+4. **Meta-prompt fidelity** — the description meta-prompts must stay byte-identical to the `storyboard-prompt-compiler` skill.
+5. **Credential handling** — password hash/verify, session token generation and hashing, Gemini key encrypt/decrypt. Pure functions whose failure modes are silent and total.
+
+Ownership isolation is verified by a scripted matrix against a live database (two accounts, every endpoint), not by unit tests.
 
 Everything else is exercised by using the app. Do not write tests for CRUD handlers.
 
@@ -156,11 +166,10 @@ Everything else is exercised by using the app. Do not write tests for CRUD handl
 - Do not add spend controls, quotas, or usage dashboards. Deliberately out of scope.
 - Do not add story-level styling or per-story aspect ratios. One global 16:9 constant.
 - Do not implement `previous_interaction_id` chaining. The column is stored for a future version; nothing reads it yet.
-- Do not add multi-user support, a users table, or `user_id` columns. Auth is one shared secret.
 - Do not introduce a job queue, Redis, or a worker process.
 - Do not add an ORM, a state management library, or a component library. React state and `fetch` are sufficient at this size.
 - Do not use presigned PUT for uploads. Uploads route through the backend so `sharp` can preprocess them.
-- Do not compare the auth secret with `===`. Use `crypto.timingSafeEqual` against equal-length buffers.
+- Do not compare credentials with `===`. Use `crypto.timingSafeEqual` against equal-length buffers, and never store a password or a session token in plaintext.
 - Do not scaffold features the spec does not describe, however obvious they seem. Ask instead.
 
 ---

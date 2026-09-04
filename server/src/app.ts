@@ -1,10 +1,10 @@
 import express from "express";
 import cors from "cors";
-import { env } from "./config/env.js";
 import { AppError } from "./lib/AppError.js";
-import { createRequireAuth } from "./middleware/auth.js";
+import { requireAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { requestLogger } from "./middleware/requestLogger.js";
+import { authRouter } from "./routes/auth.js";
 import { conceptsRouter } from "./routes/concepts.js";
 import { framesRouter } from "./routes/frames.js";
 import { generationsRouter } from "./routes/generations.js";
@@ -24,7 +24,11 @@ export function createApp(): express.Express {
   // Mounted before auth so the healthcheck needs no credentials.
   app.use("/api", healthRouter);
 
-  app.use("/api", createRequireAuth(env.APP_SECRET));
+  // Register and login must be reachable without a session. The router applies
+  // requireAuth per-route for the endpoints that do need one.
+  app.use("/api", authRouter);
+
+  app.use("/api", requireAuth);
 
   app.use("/api", conceptsRouter);
   app.use("/api", storiesRouter);

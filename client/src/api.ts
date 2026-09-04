@@ -1,15 +1,17 @@
 import type {
   ApiErrorBody,
+  AuthResponse,
   ConceptDto,
   ConceptType,
   FrameDto,
   FrameSummaryDto,
   GenerationSummaryDto,
   StoryDto,
+  UserDto,
 } from "@storyboards/shared";
 
 const BASE = import.meta.env.VITE_API_BASE_URL;
-const TOKEN_KEY = "storyboards.secret";
+const TOKEN_KEY = "storyboards.session";
 
 /** Mirrors the ApiErrorBody shape every non-2xx response has carried since phase 1. */
 export class ApiError extends Error {
@@ -42,8 +44,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const res = await fetch(`${BASE}/api${path}`, { ...init, headers });
 
-  // TECH_SPEC.md section 10: on 401 the client clears localStorage and returns
-  // to the login screen. Handled once here so no view has to remember.
+  // On 401 the client clears the stored session and returns to the login
+  // screen. Handled once here so no view has to remember -- and it now covers
+  // an expired or revoked session as well as a wrong credential.
   if (res.status === 401) {
     clearToken();
     onUnauthorized?.();
@@ -79,6 +82,14 @@ function send<T>(path: string, method: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
+  // --- auth ---
+  register: (body: { username: string; password: string; geminiApiKey: string; signupCode?: string }) =>
+    send<AuthResponse>("/auth/register", "POST", body),
+  login: (body: { username: string; password: string }) => send<AuthResponse>("/auth/login", "POST", body),
+  logout: () => send<void>("/auth/logout", "POST"),
+  getMe: () => request<UserDto>("/auth/me"),
+  updateMe: (body: { password?: string; geminiApiKey?: string }) => send<UserDto>("/auth/me", "PATCH", body),
+
   // --- concepts ---
   listConcepts: () => request<ConceptDto[]>("/concepts"),
   getConcept: (id: string) => request<ConceptDto>(`/concepts/${id}`),

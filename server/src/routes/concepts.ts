@@ -2,6 +2,7 @@ import { Router, type RequestHandler } from "express";
 import multer from "multer";
 import { MAX_UPLOAD_BYTES, CreateConceptSchema, UpdateConceptSchema, UuidParamSchema } from "@storyboards/shared";
 import { AppError } from "../lib/AppError.js";
+import { requireUser } from "../middleware/auth.js";
 import * as concepts from "../services/concepts.js";
 
 export const conceptsRouter: Router = Router();
@@ -42,36 +43,36 @@ const uploadSingleImage: RequestHandler = (req, res, next) => {
   });
 };
 
-conceptsRouter.get("/concepts", async (_req, res) => {
-  res.json(await concepts.listConcepts());
+conceptsRouter.get("/concepts", async (req, res) => {
+  res.json(await concepts.listConcepts(requireUser(req).id));
 });
 
 conceptsRouter.post("/concepts", async (req, res) => {
   const body = CreateConceptSchema.parse(req.body);
-  res.status(201).json(await concepts.createConcept(body));
+  res.status(201).json(await concepts.createConcept(requireUser(req).id, body));
 });
 
 conceptsRouter.get("/concepts/:id", async (req, res) => {
   const { id } = UuidParamSchema.parse(req.params);
-  res.json(await concepts.getConcept(id));
+  res.json(await concepts.getConcept(id, requireUser(req).id));
 });
 
 conceptsRouter.patch("/concepts/:id", async (req, res) => {
   const { id } = UuidParamSchema.parse(req.params);
   const body = UpdateConceptSchema.parse(req.body);
-  res.json(await concepts.updateConcept(id, body));
+  res.json(await concepts.updateConcept(id, requireUser(req).id, body));
 });
 
 conceptsRouter.delete("/concepts/:id", async (req, res) => {
   const { id } = UuidParamSchema.parse(req.params);
-  await concepts.deleteConcept(id);
+  await concepts.deleteConcept(id, requireUser(req).id);
   res.status(204).end();
 });
 
 conceptsRouter.post("/concepts/:id/describe", async (req, res) => {
   const { id } = UuidParamSchema.parse(req.params);
   // Returns the text without persisting it -- see describeConcept.
-  res.json({ description: await concepts.describeConcept(id) });
+  res.json({ description: await concepts.describeConcept(id, requireUser(req)) });
 });
 
 conceptsRouter.post("/concepts/:id/image", uploadSingleImage, async (req, res) => {
@@ -79,5 +80,5 @@ conceptsRouter.post("/concepts/:id/image", uploadSingleImage, async (req, res) =
   if (!req.file) {
     throw new AppError(415, "unsupported_media_type", "Expected a multipart form field named 'image'");
   }
-  res.json(await concepts.setConceptImage(id, req.file.buffer));
+  res.json(await concepts.setConceptImage(id, requireUser(req).id, req.file.buffer));
 });

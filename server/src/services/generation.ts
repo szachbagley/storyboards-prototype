@@ -12,7 +12,9 @@ import { withTransaction } from "../db/pool.js";
 import { AppError } from "../lib/AppError.js";
 import { generateImage } from "./gemini.js";
 import { classifyGeminiError } from "./geminiErrors.js";
+import type { AuthUser } from "../middleware/auth.js";
 import { compileFramePrompt, validateFrameForGeneration, type CompilerConcept } from "./promptCompiler.js";
+import { resolveUserApiKey } from "./userApiKey.js";
 import { deleteObject, generationImageKey, getObjectBytes, getPresignedUrl, putObject } from "./s3.js";
 
 async function toDto(row: GenerationDetailRow): Promise<GenerationSummaryDto> {
@@ -27,8 +29,8 @@ async function toDto(row: GenerationDetailRow): Promise<GenerationSummaryDto> {
   };
 }
 
-export async function getGeneration(id: string): Promise<GenerationSummaryDto> {
-  const row = await generationsDb.getGenerationById(id);
+export async function getGeneration(id: string, userId: string): Promise<GenerationSummaryDto> {
+  const row = await generationsDb.getGenerationById(id, userId);
   if (!row) throw new AppError(404, "not_found", `No generation with id ${id}`);
   return toDto(row);
 }
@@ -45,11 +47,16 @@ export async function getGeneration(id: string): Promise<GenerationSummaryDto> {
  * would risk the recorded prompt diverging from the real one. It also means an
  * S3 failure surfaces as a clean error with no orphaned pending row.
  */
-export async function startGeneration(frameId: string): Promise<string> {
-  const frame = await framesDb.getFrameById(frameId);
+export async function startGeneration(frameId: string, user: AuthUser): Promise<string> {
+  const frame = await framesDb.getFrameById(frameId, user.id);
   if (!frame) throw new AppError(404, "not_found", `No frame with id ${frameId}`);
 
-  const attached = await framesDb.listFrameConcepts(frameId);
+  // Resolved BEFORE the pending row is inserted. A user without a key must be
+  // rejected outright rather than left with a pending generation that can only
+  // fail -- the same rule that puts cap validation ahead of any billed work.
+  const apiKey = resolveUserApiKey(user);
+
+  const attached = await framesDb.listFrameConcepts(frameId, user.id);
 
   // Caps and the non-empty description rule, before any billed work.
   const conceptsForValidation: CompilerConcept[] = attached.map((concept) => ({
@@ -95,7 +102,7 @@ export async function startGeneration(frameId: string): Promise<string> {
   };
 
   const generationId = await withTransaction(async (client) => {
-    if (await generationsDb.hasPendingForFrame(client, frameId)) {
+    if (await generationsDb.hasPendingForFrame(client, frameId, user.id)) {
       throw new AppError(409, "generation_in_progress", "This frame already has a generation in progress.");
     }
     return generationsDb.insertPending(client, {
@@ -109,7 +116,7 @@ export async function startGeneration(frameId: string): Promise<string> {
   // Fired without awaiting: the handler returns 202 immediately. runGeneration
   // never throws -- the catch is a backstop for a bug in the error path itself,
   // since an unhandled rejection would take the process down.
-  void runGeneration(generationId, frameId, parts).catch((err: unknown) => {
+  void runGeneration(generationId, frameId, apiKey, parts).catch((err: unknown) => {
     console.error(`[generation] ${generationId} escaped its own error handling`, err);
   });
 
@@ -122,9 +129,14 @@ export async function startGeneration(frameId: string): Promise<string> {
  * If the process dies mid-call the row stays pending and the stale sweep
  * resolves it -- that is the designed recovery path, not a gap.
  */
-async function runGeneration(generationId: string, frameId: string, parts: ReturnType<typeof compileFramePrompt>["parts"]): Promise<void> {
+async function runGeneration(
+  generationId: string,
+  frameId: string,
+  apiKey: string,
+  parts: ReturnType<typeof compileFramePrompt>["parts"],
+): Promise<void> {
   try {
-    const { base64, interactionId } = await generateImage(parts);
+    const { base64, interactionId } = await generateImage(apiKey, parts);
 
     // Persist the moment bytes arrive (invariant 2). S3 first, then the row:
     // a failed row update leaves an unreferenced object, which is harmless,
@@ -190,8 +202,8 @@ function isGenerationErrorCode(code: string): code is Parameters<typeof generati
 }
 
 /** POST /frames/:id/select-generation */
-export async function selectGeneration(frameId: string, generationId: string): Promise<void> {
-  const generation = await generationsDb.getGenerationById(generationId);
+export async function selectGeneration(frameId: string, generationId: string, userId: string): Promise<void> {
+  const generation = await generationsDb.getGenerationById(generationId, userId);
   if (!generation) throw new AppError(404, "not_found", `No generation with id ${generationId}`);
 
   if (generation.frameId !== frameId) {
@@ -203,5 +215,5 @@ export async function selectGeneration(frameId: string, generationId: string): P
     throw new AppError(422, "generation_not_succeeded", `That generation is ${generation.status}, not succeeded.`);
   }
 
-  await generationsDb.setSelectedGeneration(frameId, generationId);
+  await generationsDb.setSelectedGeneration(frameId, generationId, userId);
 }

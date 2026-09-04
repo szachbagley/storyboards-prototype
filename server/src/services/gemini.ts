@@ -15,10 +15,20 @@ import { AppError } from "../lib/AppError.js";
 import type { InputPart } from "./promptCompiler.js";
 import { classifyGeminiError } from "./geminiErrors.js";
 
-// The only module in the project that imports the Gemini SDK. The API key is
-// read here from the environment by the SDK's default client and never leaves
-// the server (invariant 1).
-const ai = new GoogleGenAI({});
+// The only module in the project that imports the Gemini SDK.
+//
+// There is deliberately no module-scope client any more: every call is billed to
+// the calling user's own key, so a client is constructed per call from the key
+// passed in. Construction is local object setup with no network I/O, so this
+// costs nothing measurable -- and a cache keyed by key material would be a place
+// for one user's client to be handed to another.
+//
+// The plaintext key exists only as an argument for the duration of a call. It is
+// never logged: the log lines below print interaction ids, latency and byte
+// counts, and must stay that way.
+function clientFor(apiKey: string): GoogleGenAI {
+  return new GoogleGenAI({ apiKey });
+}
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -86,17 +96,18 @@ async function withRetryAndDeadline<T>(
 }
 
 export interface DescribeImageInput {
+  apiKey: string;
   base64: string;
   mimeType: string;
   prompt: string;
 }
 
 /** Describe a reference image (TECH_SPEC.md section 8.1). */
-export async function describeImage({ base64, mimeType, prompt }: DescribeImageInput): Promise<string> {
+export async function describeImage({ apiKey, base64, mimeType, prompt }: DescribeImageInput): Promise<string> {
   const startedAt = Date.now();
 
   return withRetryAndDeadline("describe", DESCRIBE_DEADLINE_MS, async (options) => {
-    const interaction = await ai.interactions.create(
+    const interaction = await clientFor(apiKey).interactions.create(
       {
         model: DESCRIPTION_MODEL,
         input: [
@@ -134,11 +145,11 @@ export interface GeneratedImage {
  * No temperature / top_p / top_k. This model was measured to accept them, but
  * the project sends none.
  */
-export async function generateImage(parts: InputPart[]): Promise<GeneratedImage> {
+export async function generateImage(apiKey: string, parts: InputPart[]): Promise<GeneratedImage> {
   const startedAt = Date.now();
 
   return withRetryAndDeadline("generate", GENERATION_DEADLINE_MS, async (options) => {
-    const interaction = await ai.interactions.create(
+    const interaction = await clientFor(apiKey).interactions.create(
       {
         model: IMAGE_MODEL,
         input: parts,
@@ -184,4 +195,34 @@ export async function generateImage(parts: InputPart[]): Promise<GeneratedImage>
     );
     return { base64, interactionId: interaction.id };
   });
+}
+
+/**
+ * Check that a user-supplied API key actually works, with the cheapest call
+ * available. Used at registration and whenever a key is replaced, so a typo is
+ * caught in the form rather than forty seconds into a frame generation.
+ *
+ * Returns a boolean rather than throwing: the caller turns it into a 422 with a
+ * message about the key, and any other upstream problem should not be reported
+ * to the user as "your key is bad".
+ */
+export async function validateApiKey(apiKey: string): Promise<boolean> {
+  try {
+    const interaction = await clientFor(apiKey).interactions.create(
+      {
+        model: DESCRIPTION_MODEL,
+        input: [{ type: "text", text: "Reply with the single word: ok" }],
+        generation_config: { thinking_level: DESCRIPTION_THINKING_LEVEL },
+      },
+      { timeout: 20_000, maxRetries: 0 },
+    );
+    return typeof interaction.output_text === "string";
+  } catch (err) {
+    const status = typeof err === "object" && err !== null ? (err as { status?: number }).status : undefined;
+    // 401/403 means the key is bad. Anything else -- a rate limit, an outage --
+    // is not the key's fault, so do not tell the user to replace it.
+    if (status === 401 || status === 403) return false;
+    console.error("[gemini] key validation could not complete", err);
+    throw new AppError(502, "upstream_error", "Could not verify the API key right now. Try again.");
+  }
 }

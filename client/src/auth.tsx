@@ -1,38 +1,74 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
-import { clearToken, getToken, setToken, setUnauthorizedHandler } from "./api.js";
+import type { UserDto } from "@storyboards/shared";
+import { api, clearToken, getToken, setToken, setUnauthorizedHandler } from "./api.js";
 
 interface AuthValue {
-  secret: string | null;
-  signIn: (secret: string) => void;
-  signOut: () => void;
+  user: UserDto | null;
+  /** True until the stored token has been checked against the server. */
+  loading: boolean;
+  signIn: (token: string, user: UserDto) => void;
+  signOut: () => Promise<void>;
+  setUser: (user: UserDto) => void;
 }
 
 const AuthContext = createContext<AuthValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [secret, setSecret] = useState<string | null>(() => getToken());
+  const [user, setUserState] = useState<UserDto | null>(null);
+  const [loading, setLoading] = useState(() => getToken() !== null);
   const navigate = useNavigate();
 
-  const signIn = useCallback((next: string) => {
-    setToken(next);
-    setSecret(next);
+  const signIn = useCallback((token: string, next: UserDto) => {
+    setToken(token);
+    setUserState(next);
   }, []);
 
-  const signOut = useCallback(() => {
+  const signOut = useCallback(async () => {
+    // Best effort: the server deletes the session row so the token cannot be
+    // replayed. Even if the call fails, drop it locally.
+    try {
+      await api.logout();
+    } catch {
+      /* already invalid, or offline */
+    }
     clearToken();
-    setSecret(null);
-  }, []);
+    setUserState(null);
+    navigate("/login", { replace: true });
+  }, [navigate]);
 
-  // api.ts clears the token on any 401; this puts the user back on /login.
   useEffect(() => {
     setUnauthorizedHandler(() => {
-      setSecret(null);
+      setUserState(null);
       navigate("/login", { replace: true });
     });
   }, [navigate]);
 
-  const value = useMemo(() => ({ secret, signIn, signOut }), [secret, signIn, signOut]);
+  // Rehydrate from a stored token on load, which also detects a session that
+  // was revoked or expired while the tab was closed.
+  useEffect(() => {
+    if (!getToken()) return;
+    let cancelled = false;
+    api
+      .getMe()
+      .then((me) => {
+        if (!cancelled) setUserState(me);
+      })
+      .catch(() => {
+        if (!cancelled) clearToken();
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const value = useMemo(
+    () => ({ user, loading, signIn, signOut, setUser: setUserState }),
+    [user, loading, signIn, signOut],
+  );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
@@ -43,8 +79,11 @@ export function useAuth(): AuthValue {
 }
 
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { secret } = useAuth();
+  const { user, loading } = useAuth();
   const location = useLocation();
-  if (!secret) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  // Waiting rather than redirecting: a stored token that is still valid would
+  // otherwise bounce to /login for a frame before rehydrating.
+  if (loading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
+  if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   return <>{children}</>;
 }

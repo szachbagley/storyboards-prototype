@@ -57,6 +57,18 @@ export function classifyGeminiError(err: unknown): ClassifiedGeminiError {
     return { code: "rate_limited", status: 429, message: "The AI service is rate limited. Try again shortly.", retryable: true };
   }
 
+  // Must precede the generic 4xx branch below, which would otherwise swallow a
+  // 401. The key belongs to the user now, so this is something they can fix --
+  // and retrying without changing it cannot possibly help.
+  if (status === 401 || status === 403) {
+    return {
+      code: "invalid_api_key",
+      status: 422,
+      message: "Your Gemini API key was rejected. Update it in Settings.",
+      retryable: false,
+    };
+  }
+
   if (status === 400 && SAFETY_MARKERS.some((marker) => raw.includes(marker))) {
     return {
       code: "safety_blocked",
