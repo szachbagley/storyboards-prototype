@@ -4,5 +4,16 @@
   "installCommand": "npm install",
   "buildCommand": "npx tsc --build shared && npm run build --workspace=client",
   "outputDirectory": "client/dist",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ],
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- client shared package.json package-lock.json tsconfig.base.json vercel.json",
+  "git": {
+    "deploymentEnabled": {
+      "master": true
+    }
+  }
 }
