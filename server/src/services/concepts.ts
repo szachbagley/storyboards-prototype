@@ -3,7 +3,9 @@ import * as db from "../db/concepts.js";
 import type { ConceptRow } from "../db/concepts.js";
 import { AppError } from "../lib/AppError.js";
 import { buildDescriptionPrompt } from "./descriptionPrompts.js";
+import type { AuthUser } from "../middleware/auth.js";
 import { describeImage } from "./gemini.js";
+import { resolveUserApiKey } from "./userApiKey.js";
 import { preprocessReferenceImage } from "./imagePreprocess.js";
 import { conceptImageKey, deleteObject, getObjectBytes, getPresignedUrl, putObject } from "./s3.js";
 
@@ -24,31 +26,31 @@ function notFound(id: string): AppError {
   return new AppError(404, "not_found", `No concept with id ${id}`);
 }
 
-export async function listConcepts(): Promise<ConceptDto[]> {
-  const rows = await db.listConcepts();
+export async function listConcepts(userId: string): Promise<ConceptDto[]> {
+  const rows = await db.listConcepts(userId);
   // Presigning is local signature computation, not a network call, so fanning
   // out over the list costs nothing.
   return Promise.all(rows.map(toDto));
 }
 
-export async function getConcept(id: string): Promise<ConceptDto> {
-  const row = await db.getConceptById(id);
+export async function getConcept(id: string, userId: string): Promise<ConceptDto> {
+  const row = await db.getConceptById(id, userId);
   if (!row) throw notFound(id);
   return toDto(row);
 }
 
-export async function createConcept(body: CreateConceptBody): Promise<ConceptDto> {
-  return toDto(await db.insertConcept(body.name, body.type));
+export async function createConcept(userId: string, body: CreateConceptBody): Promise<ConceptDto> {
+  return toDto(await db.insertConcept(userId, body.name, body.type));
 }
 
-export async function updateConcept(id: string, body: UpdateConceptBody): Promise<ConceptDto> {
-  const row = await db.updateConcept(id, body);
+export async function updateConcept(id: string, userId: string, body: UpdateConceptBody): Promise<ConceptDto> {
+  const row = await db.updateConcept(id, userId, body);
   if (!row) throw notFound(id);
   return toDto(row);
 }
 
-export async function deleteConcept(id: string): Promise<void> {
-  const row = await db.deleteConcept(id);
+export async function deleteConcept(id: string, userId: string): Promise<void> {
+  const row = await db.deleteConcept(id, userId);
   if (!row) throw notFound(id);
 
   if (row.imageKey) {
@@ -64,8 +66,8 @@ export async function deleteConcept(id: string): Promise<void> {
   }
 }
 
-export async function setConceptImage(id: string, upload: Buffer): Promise<ConceptDto> {
-  const existing = await db.getConceptById(id);
+export async function setConceptImage(id: string, userId: string, upload: Buffer): Promise<ConceptDto> {
+  const existing = await db.getConceptById(id, userId);
   if (!existing) throw notFound(id);
 
   const processed = await preprocessReferenceImage(upload);
@@ -78,7 +80,7 @@ export async function setConceptImage(id: string, upload: Buffer): Promise<Conce
   // on a missing key. Prefer the orphan.
   await putObject(key, processed, IMAGE_MIME_TYPE);
 
-  const row = await db.setConceptImage(id, key, IMAGE_MIME_TYPE);
+  const row = await db.setConceptImage(id, userId, key, IMAGE_MIME_TYPE);
   if (!row) throw notFound(id);
   return toDto(row);
 }
@@ -90,9 +92,13 @@ export async function setConceptImage(id: string, upload: Buffer): Promise<Conce
  * returned draft and commits it with PATCH only on confirmation, so a
  * hand-tuned description is never lost to a misclick (section 12.2).
  */
-export async function describeConcept(id: string): Promise<string> {
-  const concept = await db.getConceptById(id);
+export async function describeConcept(id: string, user: AuthUser): Promise<string> {
+  const concept = await db.getConceptById(id, user.id);
   if (!concept) throw notFound(id);
+
+  // The caller's own key pays for this call. Resolve it before any other work so
+  // a user without one is told plainly rather than getting an upstream error.
+  const apiKey = resolveUserApiKey(user);
 
   if (!concept.imageKey) {
     // A description invented from a name would be worse than none: the
@@ -110,6 +116,7 @@ export async function describeConcept(id: string): Promise<string> {
   // Already <= 1024px JPEG from upload preprocessing, which is the size the
   // Gemini guidance recommends -- no further downscaling needed here.
   return describeImage({
+    apiKey,
     base64: bytes.toString("base64"),
     mimeType: concept.imageMime ?? IMAGE_MIME_TYPE,
     prompt: buildDescriptionPrompt(concept.type),

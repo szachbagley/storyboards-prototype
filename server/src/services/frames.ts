@@ -57,13 +57,13 @@ async function generationToDto(row: GenerationRow): Promise<GenerationSummaryDto
   };
 }
 
-async function toFrameDto(row: FrameRow): Promise<FrameDto> {
+async function toFrameDto(row: FrameRow, userId: string): Promise<FrameDto> {
   // listFrameConcepts orders by ord, and that order is preserved straight
   // through into the DTO array -- invariant 5 depends on it.
   const [summary, conceptRows, generationRows] = await Promise.all([
     toSummary(row),
-    framesDb.listFrameConcepts(row.id),
-    framesDb.listFrameGenerations(row.id),
+    framesDb.listFrameConcepts(row.id, userId),
+    framesDb.listFrameGenerations(row.id, userId),
   ]);
   return {
     ...summary,
@@ -72,46 +72,47 @@ async function toFrameDto(row: FrameRow): Promise<FrameDto> {
   };
 }
 
-export async function listStoryFrames(storyId: string): Promise<FrameSummaryDto[]> {
+export async function listStoryFrames(storyId: string, userId: string): Promise<FrameSummaryDto[]> {
   // An empty array for a nonexistent story is a silent lie the client would
   // render as an empty grid.
-  if (!(await storiesDb.storyExists(storyId))) {
+  if (!(await storiesDb.storyExists(storyId, userId))) {
     throw new AppError(404, "not_found", `No story with id ${storyId}`);
   }
-  return Promise.all((await framesDb.listFramesByStory(storyId)).map(toSummary));
+  return Promise.all((await framesDb.listFramesByStory(storyId, userId)).map(toSummary));
 }
 
-export async function getFrame(id: string): Promise<FrameDto> {
-  const row = await framesDb.getFrameById(id);
+export async function getFrame(id: string, userId: string): Promise<FrameDto> {
+  const row = await framesDb.getFrameById(id, userId);
   if (!row) throw frameNotFound(id);
-  return toFrameDto(row);
+  return toFrameDto(row, userId);
 }
 
-export async function createFrame(storyId: string, body: CreateFrameBody): Promise<FrameDto> {
-  if (!(await storiesDb.storyExists(storyId))) {
+export async function createFrame(storyId: string, userId: string, body: CreateFrameBody): Promise<FrameDto> {
+  if (!(await storiesDb.storyExists(storyId, userId))) {
     throw new AppError(404, "not_found", `No story with id ${storyId}`);
   }
 
   // Reading max(position) and inserting must not interleave with another
   // append, or two frames land on the same position.
   const id = await withTransaction(async (client) => {
-    const max = await framesDb.maxPositionInStory(client, storyId);
-    return framesDb.insertFrame(client, storyId, appendPosition(max), body.description ?? "");
+    const max = await framesDb.maxPositionInStory(client, storyId, userId);
+    return framesDb.insertFrame(client, storyId, userId, appendPosition(max), body.description ?? "");
   });
+  if (!id) throw new AppError(404, "not_found", `No story with id ${storyId}`);
 
-  return getFrame(id);
+  return getFrame(id, userId);
 }
 
-export async function updateFrame(id: string, body: UpdateFrameBody): Promise<FrameDto> {
+export async function updateFrame(id: string, userId: string, body: UpdateFrameBody): Promise<FrameDto> {
   await withTransaction(async (client) => {
-    const updated = await framesDb.updateFrameFields(client, id, {
+    const updated = await framesDb.updateFrameFields(client, id, userId, {
       ...(body.description !== undefined ? { description: body.description } : {}),
       ...(body.position !== undefined ? { position: body.position } : {}),
     });
     if (!updated) throw frameNotFound(id);
 
     if (body.conceptIds !== undefined) {
-      const existing = await framesDb.findExistingConceptIds(client, body.conceptIds);
+      const existing = await framesDb.findExistingConceptIds(client, body.conceptIds, userId);
       const unknown = body.conceptIds.filter((conceptId) => !existing.has(conceptId));
       if (unknown.length > 0) {
         // Named ids beat catching a foreign-key violation and sniffing
@@ -127,14 +128,14 @@ export async function updateFrame(id: string, body: UpdateFrameBody): Promise<Fr
     }
   });
 
-  return getFrame(id);
+  return getFrame(id, userId);
 }
 
-export async function deleteFrame(id: string): Promise<void> {
+export async function deleteFrame(id: string, userId: string): Promise<void> {
   // Collected before the delete: the rows cascade away and their keys with them.
-  const imageKeys = await generationsDb.imageKeysForFrame(id);
+  const imageKeys = await generationsDb.imageKeysForFrame(id, userId);
 
-  if (!(await framesDb.deleteFrame(id))) throw frameNotFound(id);
+  if (!(await framesDb.deleteFrame(id, userId))) throw frameNotFound(id);
 
   // Best effort, matching the concept-delete precedent: the rows are already
   // gone, so a failed object delete must not fail the request. There is no

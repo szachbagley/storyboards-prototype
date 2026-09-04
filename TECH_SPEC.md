@@ -7,7 +7,7 @@
 
 ## 1. Overview
 
-A single-user web application for generating and managing film storyboards using Google's Gemini APIs. The core idea: a user builds a reusable library of **Concepts** (characters, settings, props) each anchored by a reference image and an identity description. They then compose **Frames** within **Stories**, writing a freeform scene description and attaching the relevant concepts. The system compiles a prompt from the frame description plus the attached concept descriptions, sends it to Nano Banana along with the concept reference images, and returns a rendered storyboard frame.
+A multi-user web application for generating and managing film storyboards using Google's Gemini APIs. The core idea: each account builds its own private, reusable library of **Concepts** (characters, settings, props) each anchored by a reference image and an identity description. They then compose **Frames** within **Stories**, writing a freeform scene description and attaching the relevant concepts. The system compiles a prompt from the frame description plus the attached concept descriptions, sends it to Nano Banana along with the concept reference images, and returns a rendered storyboard frame.
 
 The reference images are the mechanism that makes a character look the same in frame 1 and frame 7. The text descriptions supplement them; they do not replace them.
 
@@ -40,7 +40,8 @@ This is a **rough proof-of-concept** built as a rapid AI-development exercise. S
 - Frame CRUD within a story: freeform description, concept attachment, ordering
 - Frame image generation via Nano Banana with concept reference images attached
 - Generation history per frame with a selected result
-- Single-user authentication via shared secret
+- Accounts: username, password, and a per-user Gemini API key
+- Session-based authentication; each account sees only its own data
 
 ### Explicitly out of scope for v1
 
@@ -50,7 +51,6 @@ This is a **rough proof-of-concept** built as a rapid AI-development exercise. S
 | Story-level styling | User expresses style inline in each frame description |
 | Per-story aspect ratio | One global constant: 16:9 |
 | Sequential frame continuity (`previous_interaction_id` chaining) | Adds order-dependence between frames |
-| Multi-user accounts | Shared secret only; see §11 for the debt this creates |
 | Concept reference canonicalization | First lever to pull if consistency disappoints |
 | Export (PDF / contact sheet) | Not needed to prove the concept |
 
@@ -80,6 +80,9 @@ One attempt at rendering a frame. Frames accumulate generations; regenerating ne
 ---
 
 ## 5. Database schema
+
+See also `002_identity.sql`, which adds `users` and `sessions` and the
+`user_id` columns on `concepts` and `stories`.
 
 ```sql
 CREATE TYPE concept_type AS ENUM ('character', 'setting', 'prop');
@@ -349,6 +352,7 @@ A boolean failure state is not sufficient here. Storyboards skew violent — the
 | `invalid_input` | Validation failure | Specific field guidance |
 | `upstream_error` | 5xx or SDK error | Offer retry |
 | `abandoned` | Swept by §7.1 | Offer retry |
+| `invalid_api_key` | The caller's own Gemini key was rejected (401/403) | Tell them to update it in Settings; retrying cannot help |
 
 `rate_limited` is the only code that auto-retries — twice, with exponential backoff.
 
@@ -378,15 +382,47 @@ This is not cosmetic. Reference images gain nothing from being 12 megapixels, an
 
 ## 10. Authentication
 
-Single shared secret. No users table, no sessions.
+Accounts with username and password. Sessions are opaque bearer tokens.
 
-- `APP_SECRET` environment variable on the API
-- A login screen takes the secret and stores it in `localStorage`
-- Every request carries `Authorization: Bearer <secret>`
-- Middleware compares using `crypto.timingSafeEqual` against a buffer of equal length — a naive `===` comparison leaks the secret through timing
-- Failure returns `401`; the client clears `localStorage` and returns to the login screen
+- `POST /auth/register` takes `{ username, password, geminiApiKey }`. The key is
+  validated against Gemini before the account is created, so a typo is caught in
+  the form rather than on the first generation.
+- `POST /auth/login` returns `{ token, user }`. The token is 32 random bytes,
+  base64url-encoded, sent as `Authorization: Bearer <token>`.
+- Sessions are stored as `sha256(token)` in a `sessions` table, so a database
+  dump yields no live sessions. They are revocable, unlike a JWT: sign-out
+  deletes the row and a password change deletes every other session for that
+  user.
+- Absolute expiry of `SESSION_TTL_DAYS` (30). Expired rows are removed by the
+  existing sweeper.
+- Passwords are hashed with `scrypt` (`N=16384, r=8, p=1`), a 16-byte random
+  salt, stored self-describing as `scrypt$N$r$p$salt$hash`, and compared with
+  `crypto.timingSafeEqual`.
+- After `MAX_LOGIN_ATTEMPTS` (10) consecutive failures an account locks for
+  `LOGIN_LOCKOUT_MINUTES` (15). An unknown username, a wrong password and a
+  locked account all return the same message, so the endpoint is not a username
+  oracle.
+- Registration is open unless `SIGNUP_CODE` is set, in which case it is required.
 
-**Known debt:** no table carries a `user_id`. Multi-user is a schema migration plus a backfill, not a configuration change. This is an accepted tradeoff for the prototype, recorded here so it is a decision rather than a surprise.
+### 10.1 Data ownership
+
+`concepts` and `stories` carry a `user_id`. Frames and generations are scoped
+transitively — frame → story → user — so the owner has exactly one source of
+truth and cannot drift out of sync.
+
+Another account's row returns `404`, never `403`: a `403` would confirm the id
+exists and turn every endpoint into an existence oracle.
+
+### 10.2 The per-user Gemini key
+
+Each account supplies its own key, encrypted at rest with AES-256-GCM under the
+server's `ENCRYPTION_KEY`. It is decrypted only at the call site in
+`services/gemini.ts`, never written to `input_snapshot`, never logged, and never
+returned by any endpoint — `GET /auth/me` exposes only `hasGeminiKey` and a
+4-character hint.
+
+Losing `ENCRYPTION_KEY` makes every stored key unrecoverable; users would have
+to re-enter them.
 
 ---
 
@@ -395,15 +431,15 @@ Single shared secret. No users table, no sessions.
 | Variable | Location | Notes |
 |---|---|---|
 | `DATABASE_URL` | API | Railway-provided |
-| `GEMINI_API_KEY` | API | |
-| `APP_SECRET` | API | Shared auth secret |
+| `ENCRYPTION_KEY` | API | 32 bytes base64; encrypts each user's Gemini key at rest |
+| `SIGNUP_CODE` | API | Optional; when set, registration requires it |
 | `AWS_ACCESS_KEY_ID` | API | |
 | `AWS_SECRET_ACCESS_KEY` | API | |
 | `AWS_REGION` | API | |
 | `S3_BUCKET` | API | |
 | `VITE_API_BASE_URL` | Client | Railway API origin |
 
-`GEMINI_API_KEY` is never exposed to the client under any circumstance. All Gemini traffic originates from the Railway backend.
+There is no server-wide Gemini key. Each request uses the caller's own key, decrypted server-side; no key is ever exposed to the client, and all Gemini traffic originates from the Railway backend.
 
 Application constants (model IDs, `ASPECT_RATIO = "16:9"`, `IMAGE_SIZE = "1K"`, `MAX_CHARACTER_CONCEPTS = 4`, `MAX_TOTAL_CONCEPTS = 10`, `POLL_INTERVAL_MS = 2000`) live in a single shared module, not in environment variables — they are code, not deployment config.
 

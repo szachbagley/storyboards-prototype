@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { UuidParamSchema } from "@storyboards/shared";
+import { requireUser } from "../middleware/auth.js";
 import * as generation from "../services/generation.js";
 
 export const generationsRouter: Router = Router();
@@ -8,5 +9,5 @@ export const generationsRouter: Router = Router();
 // is pending; the Gemini call itself is never proxied to the browser.
 generationsRouter.get("/generations/:id", async (req, res) => {
   const { id } = UuidParamSchema.parse(req.params);
-  res.json(await generation.getGeneration(id));
+  res.json(await generation.getGeneration(id, requireUser(req).id));
 });

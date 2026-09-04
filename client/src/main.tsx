@@ -7,6 +7,8 @@ import { ConceptDetail } from "./routes/ConceptDetail.js";
 import { Concepts } from "./routes/Concepts.js";
 import { FrameEditor } from "./routes/FrameEditor.js";
 import { Login } from "./routes/Login.js";
+import { Register } from "./routes/Register.js";
+import { Settings } from "./routes/Settings.js";
 import { StoryDetail } from "./routes/StoryDetail.js";
 import { Stories } from "./routes/Stories.js";
 import "./index.css";
@@ -20,6 +22,7 @@ createRoot(rootElement).render(
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
           <Route
             element={
               <RequireAuth>
@@ -27,6 +30,7 @@ createRoot(rootElement).render(
               </RequireAuth>
             }
           >
+            <Route path="/settings" element={<Settings />} />
             <Route path="/concepts" element={<Concepts />} />
             <Route path="/concepts/:id" element={<ConceptDetail />} />
             <Route path="/stories" element={<Stories />} />

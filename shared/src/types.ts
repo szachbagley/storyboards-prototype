@@ -18,6 +18,10 @@ export const GENERATION_ERROR_CODES = [
   "invalid_input",
   "upstream_error",
   "abandoned",
+  // The caller's own Gemini key was rejected. Distinct from invalid_input,
+  // which means the server built a bad request: this one the user can fix by
+  // updating their key in Settings, and retrying without changing it cannot help.
+  "invalid_api_key",
 ] as const;
 export type GenerationErrorCode = (typeof GENERATION_ERROR_CODES)[number];
 
@@ -91,4 +95,22 @@ export interface FrameDto extends FrameSummaryDto {
   concepts: ConceptDto[];
   /** Newest first (TECH_SPEC.md section 12.4). */
   generations: GenerationSummaryDto[];
+}
+
+/** A user as returned by the API.
+ *
+ * Deliberately carries no key material, no password hash and no lockout state.
+ * geminiKeyHint is the last 4 characters only, so Settings can show something
+ * recognisable without the key ever leaving the server. */
+export interface UserDto {
+  id: string;
+  username: string;
+  hasGeminiKey: boolean;
+  geminiKeyHint: string | null;
+  createdAt: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: UserDto;
 }

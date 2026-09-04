@@ -1,33 +1,64 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-import type { RequestHandler } from "express";
+import type { Request, RequestHandler } from "express";
+import { findValidSession } from "../db/sessions.js";
 import { AppError } from "../lib/AppError.js";
+import { hashSessionToken } from "../services/sessionToken.js";
 
 const BEARER_PATTERN = /^Bearer (.+)$/;
 
+export interface AuthUser {
+  id: string;
+  username: string;
+  geminiKeyCiphertext: Buffer | null;
+  geminiKeyIv: Buffer | null;
+  geminiKeyTag: Buffer | null;
+  geminiKeyHint: string | null;
+  createdAt: Date;
+}
+
 /**
- * Single shared secret authentication (TECH_SPEC.md section 10).
+ * Session authentication, replacing the single shared secret.
  *
- * Takes the expected secret as an argument rather than reading the environment
- * directly, so this module stays free of side effects and is testable without
- * a configured environment.
+ * The token is hashed before lookup because sessions are stored as sha256 --
+ * see services/sessionToken.ts. Expiry is enforced in the query, so an expired
+ * session simply does not resolve.
  */
-export function createRequireAuth(secret: string): RequestHandler {
-  const expectedDigest = createHash("sha256").update(secret).digest();
+export const requireAuth: RequestHandler = (req, _res, next) => {
+  const match = BEARER_PATTERN.exec(req.get("authorization") ?? "");
+  if (!match?.[1]) {
+    next(new AppError(401, "unauthorized", "Missing or malformed bearer token"));
+    return;
+  }
 
-  return function requireAuth(req, _res, next) {
-    const match = BEARER_PATTERN.exec(req.get("authorization") ?? "");
-    if (!match?.[1]) {
-      throw new AppError(401, "unauthorized", "Missing or malformed bearer token");
-    }
+  const tokenHash = hashSessionToken(match[1]);
+  findValidSession(tokenHash)
+    .then((session) => {
+      if (!session) {
+        next(new AppError(401, "unauthorized", "Your session is no longer valid. Sign in again."));
+        return;
+      }
+      req.user = {
+        id: session.userId,
+        username: session.username,
+        geminiKeyCiphertext: session.geminiKeyCiphertext,
+        geminiKeyIv: session.geminiKeyIv,
+        geminiKeyTag: session.geminiKeyTag,
+        geminiKeyHint: session.geminiKeyHint,
+        createdAt: session.createdAt,
+      };
+      req.sessionTokenHash = tokenHash;
+      next();
+    })
+    .catch(next);
+};
 
-    // Compare fixed-width digests rather than the raw secrets. timingSafeEqual
-    // throws on a length mismatch, and guarding that with a length check would
-    // itself leak the length of the secret through timing.
-    const providedDigest = createHash("sha256").update(match[1]).digest();
-    if (!timingSafeEqual(providedDigest, expectedDigest)) {
-      throw new AppError(401, "unauthorized", "Invalid credentials");
-    }
+/** Narrows req.user for handlers behind requireAuth, so `req.user!` never
+ *  appears in a route. Throwing here would mean the middleware was skipped. */
+export function requireUser(req: Request): AuthUser {
+  if (!req.user) throw new AppError(401, "unauthorized", "Authentication required");
+  return req.user;
+}
 
-    next();
-  };
+export function requireSessionTokenHash(req: Request): string {
+  if (!req.sessionTokenHash) throw new AppError(401, "unauthorized", "Authentication required");
+  return req.sessionTokenHash;
 }

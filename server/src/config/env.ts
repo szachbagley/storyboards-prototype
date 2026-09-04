@@ -19,7 +19,6 @@ const EnvSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
-  APP_SECRET: z.string().min(8),
 
   // The AWS SDK's default credential provider chain reads the two key
   // variables from process.env itself, so they are never passed to the client
@@ -30,11 +29,20 @@ const EnvSchema = z.object({
   AWS_REGION: z.string().min(1),
   S3_BUCKET: z.string().min(1),
 
-  // Read by the @google/genai default client, same pattern as the AWS keys:
-  // validated here only so a missing key fails at boot rather than on the first
-  // description request. It never reaches the browser (invariant 1) -- all
-  // Gemini traffic originates on the server.
-  GEMINI_API_KEY: z.string().min(1),
+  // Master key for encrypting each user's Gemini API key at rest. Validated for
+  // decoded length, not just presence: a 31-byte key would fail only later, at
+  // the first createCipheriv call.
+  //
+  // Losing or changing this makes every stored Gemini key unrecoverable. Users
+  // would have to re-enter them.
+  ENCRYPTION_KEY: z
+    .string()
+    .refine((value) => Buffer.from(value, "base64").length === 32, {
+      message: "must be 32 bytes, base64-encoded (openssl rand -base64 32)",
+    }),
+
+  // Optional registration gate. Unset means open registration.
+  SIGNUP_CODE: z.string().min(1).optional(),
 });
 
 const parsed = EnvSchema.safeParse(process.env);

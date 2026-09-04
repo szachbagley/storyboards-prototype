@@ -1,4 +1,5 @@
 import { STALE_GENERATION_AGE_MS, SWEEP_INTERVAL_MS } from "@storyboards/shared";
+import { deleteExpiredSessions } from "../db/sessions.js";
 import { sweepStale } from "../db/generations.js";
 
 /**
@@ -19,6 +20,11 @@ async function runSweep(): Promise<void> {
     // Silent when there is nothing to do, so this does not spam the log every
     // minute for the lifetime of the process.
     if (swept > 0) console.log(`[sweep] marked ${swept} abandoned generation(s)`);
+
+    // Expired sessions ride along on the existing interval rather than getting
+    // one of their own.
+    const sessions = await deleteExpiredSessions();
+    if (sessions > 0) console.log(`[sweep] deleted ${sessions} expired session(s)`);
   } catch (err) {
     console.error("[sweep] failed", err);
   }
