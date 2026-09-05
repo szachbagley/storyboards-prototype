@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
   LOGIN_LOCKOUT_MINUTES,
   MAX_LOGIN_ATTEMPTS,
@@ -81,11 +82,22 @@ export async function register(body: RegisterBody): Promise<AuthResponse> {
   return { token, user: toUserDto(user) };
 }
 
+/**
+ * A throwaway hash, derived once at startup, used to keep the timing of a
+ * failed login roughly constant.
+ *
+ * Without it an unknown username returns immediately while a known one costs a
+ * scrypt derivation (~24ms). The generic error message hides *which* check
+ * failed, but the timing difference would still leak which usernames exist.
+ */
+const DUMMY_HASH = hashPassword(randomBytes(32).toString("hex"));
+
 export async function login(body: LoginBody): Promise<AuthResponse> {
   const user = await usersDb.findUserByUsername(body.username);
   if (!user) {
-    // Still costs a hash-shaped delay? No -- but the username does not exist, so
-    // there is nothing to compare. The generic error is what hides this.
+    // Burn a comparable amount of time before failing, so an unknown username
+    // is not distinguishable from a wrong password by how fast it returns.
+    await verifyPassword(body.password, await DUMMY_HASH);
     throw invalidCredentials();
   }
 
