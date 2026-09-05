@@ -803,3 +803,61 @@ and `DELETE FROM concepts` statements in §3 must therefore come **before** the
 `ALTER` statements — which is the order given, but it is worth knowing the
 migration would abort rather than silently produce a nullable column if they
 were reordered.
+
+---
+
+## 10. Execution notes
+
+Written after the plan shipped. Records where execution diverged from §4 and
+what the verification actually found, so the plan is not read later as though it
+had predicted everything correctly.
+
+### Divergences from the plan
+
+**`server/test/auth.test.ts` was deleted, not updated.** It exercised
+`createRequireAuth`, the shared-secret factory that §1 removes outright. There
+was nothing in it to carry forward. `credentials.test.ts` (24 tests) replaces it
+as the fifth sanctioned test area.
+
+**Ownership isolation was verified against a live database, not by unit tests.**
+§6 called for this and it was the right call: the failure mode is a missing
+`WHERE user_id`, which no unit test over a mocked layer would catch. The matrix
+ran 16 checks from a second account against every resource of the first — all
+`404` or `422 unknown_concept`, never `403` — plus the converse, confirming the
+first account had not lost access to its own work. It was re-run against
+production after deployment.
+
+**Frames and generations are scoped transitively.** §3 puts `user_id` on
+`concepts` and `stories` only. Ownership of a frame is therefore
+frame → story → user, and every frame and generation query carries that join.
+This is load-bearing and easy to drop; it is now invariant 10 in `CLAUDE.md`.
+
+### Found after deployment
+
+**Login leaked which usernames exist, via timing.** Not anticipated anywhere in
+this plan. An unknown username returned as soon as the user lookup missed, while
+a known username with a wrong password paid the 24 ms scrypt derivation measured
+in §9. The generic error message hid *which* check failed; the clock did not.
+
+Measured against production over the public internet, n=24 interleaved, before
+the fix: unknown usernames answered **35.9 ms faster at the minimum**, 34.9 ms
+at p25, 38.0 ms at the median. Agreement across all three estimators is what
+distinguishes a real signal from network jitter — a first attempt at n=4 gave a
+*negative* median gap, because jitter over the public internet is far larger
+than the effect being measured.
+
+Fixed in `9d1df37` by verifying against a throwaway hash derived once at
+startup, using the same scrypt parameters so the work matches rather than
+merely approximating a delay. After: **+9.1 ms min, +5.9 ms p25, +2.1 ms
+median** — inside the noise band, and no longer consistent across estimators.
+
+A residual remains: the known-username path also writes a failed-attempt row
+that the unknown path does not. That is a far smaller channel than a full key
+derivation, and it is not currently distinguishable from noise, but it is the
+next thing to look at if this is ever revisited.
+
+**Lesson for §9-style spikes.** §9 measured that scrypt costs 24 ms and treated
+that as a cost question. It is also a *timing-channel* question, and the plan
+did not ask whether that cost was observable from outside. Any per-user branch
+whose two sides do measurably different amounts of work is a side channel,
+whether or not the error messages agree.
