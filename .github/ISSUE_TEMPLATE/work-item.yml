@@ -1,0 +1,97 @@
+name: Work item
+description: Define one independently reviewable outcome, bug fix, or improvement.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues in this repository are public. Do not include credentials, private user data, or sensitive logs.
+        Keep this issue focused on one outcome. Split unrelated outcomes into separate issues.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Feature or improvement
+        - Bug fix
+        - Maintenance or documentation
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome / problem
+      description: What should change, for whom, and why does it matter?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and exclusions
+      description: Describe what is included and what is explicitly out of scope.
+      placeholder: |
+        In scope:
+        - ...
+        Out of scope:
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Bug reproduction
+      description: For bugs, include steps, expected and actual behavior, environment, and sanitized evidence. Otherwise leave blank.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable, independently checkable conditions for completion.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification plan
+      description: Specify automated checks and manual scenarios, including relevant failure or edge cases. State how each acceptance criterion will be checked.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and decisions
+      description: Link prerequisites and record unresolved decisions, their owners, and what would unblock work. Write None if there are none.
+    validations:
+      required: true
+  - type: textarea
+    id: deployment
+    attributes:
+      label: Deployment considerations
+      description: Describe migrations, configuration, compatibility, rollout and rollback needs, or explain why none apply. An implementation request does not authorize merging or deployment.
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Proposed priority; confirm during triage. This does not automatically set a Project field.
+      options:
+        - P0 - Critical incident
+        - P1 - High priority
+        - P2 - Normal priority
+        - P3 - Low priority
+      default: 2
+    validations:
+      required: true
+  - type: dropdown
+    id: blocked
+    attributes:
+      label: Blocked
+      description: If blocked, explain the dependency, owner, and next action above. Update this separately from workflow stage.
+      options:
+        - Not blocked
+        - Blocked
+      default: 0
+    validations:
+      required: true
