@@ -1,5 +1,7 @@
 # Phase 6 Plan — The Generation Pipeline
 
+> Historical implementation record. References to `CLAUDE.md` and `.claude/skills/` describe the original layout. For current contribution instructions, read [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and the skills linked from AGENTS.md.
+
 **Status:** ready to execute
 **Corresponds to:** `TECH_SPEC.md` §13 build order, item 6
 **Depends on:** phases 1–5 — all complete

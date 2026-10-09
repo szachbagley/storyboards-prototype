@@ -1,5 +1,7 @@
 # Phase 5 Plan — The Prompt Compiler
 
+> Historical implementation record. References to `CLAUDE.md` and `.claude/skills/` describe the original layout. For current contribution instructions, read [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and the skills linked from AGENTS.md.
+
 **Status:** ready to execute
 **Corresponds to:** `TECH_SPEC.md` §13 build order, item 5
 **Depends on:** phases 1–4 — all complete

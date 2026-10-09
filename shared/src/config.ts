@@ -1,5 +1,5 @@
 // Application constants. These are code, not deployment configuration -- see
-// TECH_SPEC.md 11 and invariant 9 in CLAUDE.md. Nothing here belongs in an
+// TECH_SPEC.md 11 and invariant 9 in AGENTS.md. Nothing here belongs in an
 // environment variable, and no call site should re-declare any of it inline.
 
 // --- Gemini models --------------------------------------------------------
