@@ -4,7 +4,7 @@ import { appendPosition, positionBetween } from "../src/position.js";
 
 /**
  * Frame ordering (TECH_SPEC.md section 5.2), one of the three test areas
- * CLAUDE.md sanctions.
+ * AGENTS.md sanctions.
  *
  * Assertions are about resulting ORDER wherever possible, not just about
  * numbers: the numbers are an implementation detail of the scheme, while the

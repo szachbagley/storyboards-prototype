@@ -1,5 +1,7 @@
 # Railway Deployment Plan — Database and API
 
+> Historical implementation record. References to `CLAUDE.md` and `.claude/skills/` describe the original layout. For current contribution instructions, read [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and the skills linked from AGENTS.md.
+
 **Status:** ready to execute
 **Scope:** PostgreSQL and the Node API on Railway. The client goes to Vercel separately.
 **Written:** 2026-08-19
