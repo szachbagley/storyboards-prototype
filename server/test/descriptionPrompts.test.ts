@@ -17,10 +17,10 @@ import {
  * This test re-parses the skill at test time and asserts byte equality against
  * the transcribed constants. Reading the skill here is safe in a way that
  * reading it at runtime would not be -- the test always runs inside the repo,
- * whereas the server may be deployed without .claude/.
+ * whereas the server may be deployed without .agents/.
  */
 const SKILL_PATH = fileURLToPath(
-  new URL("../../.claude/skills/storyboard-prompt-compiler/SKILL.md", import.meta.url),
+  new URL("../../.agents/skills/storyboard-prompt-compiler/SKILL.md", import.meta.url),
 );
 
 const skill = readFileSync(SKILL_PATH, "utf8");

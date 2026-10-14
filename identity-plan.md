@@ -1,5 +1,7 @@
 # Identity Management Plan — Accounts, Sessions, and Per-User Gemini Keys
 
+> Historical implementation record. References to `CLAUDE.md` and `.claude/skills/` describe the original layout. For current contribution instructions, read [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and the skills linked from AGENTS.md.
+
 **Status:** ready to execute
 **Written:** 2026-09-03
 **Supersedes:** the single shared-secret auth described in `TECH_SPEC.md` §10

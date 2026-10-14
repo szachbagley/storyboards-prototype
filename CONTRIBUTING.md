@@ -1,6 +1,6 @@
 # Contributing
 
-Use GitHub Issues to define work and pull requests to review it. Read [CLAUDE.md](CLAUDE.md) and [TECH_SPEC.md](TECH_SPEC.md) before changing application behavior; this guide complements their architecture and testing guidance.
+Use GitHub Issues to define work and pull requests to review it. Read [AGENTS.md](AGENTS.md) and [TECH_SPEC.md](TECH_SPEC.md) before changing application behavior; this guide complements their architecture and testing guidance.
 
 Maintainers can track work on the private [Development Work project](https://github.com/users/szachbagley/projects/2). Project access is separate from repository access; public contributors can work through repository issues and PRs without access to that board.
 
@@ -40,7 +40,7 @@ When using a GitHub Project, use its Status, Priority, and Blocked fields for cu
 
 ## Verify the change
 
-Use the commands and testing scope documented in [CLAUDE.md](CLAUDE.md). Current root commands include `npm run typecheck`, `npm test`, and `npm run build`. Run checks relevant to the change and record exact results. Explain any skipped checks; never describe an unrun check as passing.
+Use the commands and testing scope documented in [AGENTS.md](AGENTS.md). Current root commands include `npm run typecheck`, `npm test`, and `npm run build`. Run checks relevant to the change and record exact results. Explain any skipped checks; never describe an unrun check as passing.
 
 For UI changes, include manual evidence for the affected flow and relevant failure, cancellation, and repeat-action cases. Follow the existing testing guidance for ownership isolation and external-service behavior. Do not use real credentials or private data in public evidence.
 

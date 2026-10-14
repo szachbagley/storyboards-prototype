@@ -2,14 +2,11 @@ import type { ConceptType } from "@storyboards/shared";
 
 // Meta-prompts for AI-generated concept descriptions (TECH_SPEC.md section 8.1).
 //
-// SOURCE OF TRUTH: .claude/skills/storyboard-prompt-compiler/SKILL.md
+// SOURCE OF TRUTH: .agents/skills/storyboard-prompt-compiler/SKILL.md
 // These strings are transcribed verbatim from that skill and must stay
 // byte-identical to it; server/test/descriptionPrompts.test.ts enforces that.
 // The skill is documentation and is not deployed, so the text is duplicated
 // here rather than read at runtime.
-//
-// TECH_SPEC.md section 8.1 refers to a "nano-banana-prompts" skill. No such
-// skill exists -- the prompts live in storyboard-prompt-compiler.
 //
 // This is the FIRST of the three places the identity-only rule is enforced
 // (section 8.2). The other two are the concept textarea placeholder and the

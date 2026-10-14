@@ -1,5 +1,7 @@
 # Phase 4 Plan — Stories and Frames CRUD, Ordering, Concept Attachment
 
+> Historical implementation record. References to `CLAUDE.md` and `.claude/skills/` describe the original layout. For current contribution instructions, read [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and the skills linked from AGENTS.md.
+
 **Status:** ready to execute
 **Corresponds to:** `TECH_SPEC.md` §13 build order, item 4
 **Depends on:** phases 1–3 — all complete

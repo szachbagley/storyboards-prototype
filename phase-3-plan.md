@@ -1,5 +1,7 @@
 # Phase 3 Plan — Description Generation Endpoint and Meta-Prompts
 
+> Historical implementation record. References to `CLAUDE.md` and `.claude/skills/` describe the original layout. For current contribution instructions, read [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and the skills linked from AGENTS.md.
+
 **Status:** ready to execute
 **Corresponds to:** `TECH_SPEC.md` §13 build order, item 3
 **Depends on:** phase 1 (config, auth), phase 2 (concepts, S3) — both complete

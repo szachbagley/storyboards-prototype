@@ -9,7 +9,7 @@ import { AppError } from "../lib/AppError.js";
 // The prompt compiler (TECH_SPEC.md section 8.4).
 //
 // SOURCE OF TRUTH for the two constants below:
-// .claude/skills/storyboard-prompt-compiler/SKILL.md
+// .agents/skills/storyboard-prompt-compiler/SKILL.md
 // They are transcribed verbatim and must stay byte-identical to that skill;
 // server/test/promptCompiler.test.ts enforces it. The skill is documentation
 // and is not deployed, so the text is duplicated here rather than read at

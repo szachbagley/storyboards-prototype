@@ -14,11 +14,11 @@ import {
 /**
  * The prompt compiler. Every rule here fails SILENTLY when broken -- a
  * violation produces plausible-looking but degraded images, never an error --
- * which is why this is the one component CLAUDE.md calls worth real tests.
+ * which is why this is the one component AGENTS.md calls worth real tests.
  */
 
 const SKILL_PATH = fileURLToPath(
-  new URL("../../.claude/skills/storyboard-prompt-compiler/SKILL.md", import.meta.url),
+  new URL("../../.agents/skills/storyboard-prompt-compiler/SKILL.md", import.meta.url),
 );
 const skill = readFileSync(SKILL_PATH, "utf8");
 

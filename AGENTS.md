@@ -1,6 +1,19 @@
-# CLAUDE.md
+# AGENTS.md
 
-Project guidance for Claude Code. Read `TECH_SPEC.md` for the full design; this file covers what to do, what not to do, and what your training data will get wrong.
+Project guidance for coding agents. Read `TECH_SPEC.md` for the full design; this file covers what to do, what not to do, and what your training data will get wrong.
+
+---
+
+## Read before contributing
+
+Follow this file and [CONTRIBUTING.md](CONTRIBUTING.md) for every contribution. Read [TECH_SPEC.md](TECH_SPEC.md) before changing application behavior.
+
+Repository skills live in `.agents/skills/`. Read the relevant `SKILL.md` before working on its subject:
+
+- [gemini-nano-banana](.agents/skills/gemini-nano-banana/SKILL.md) — Gemini API calls, image generation or understanding, SDK usage, model IDs, and error handling.
+- [storyboard-prompt-compiler](.agents/skills/storyboard-prompt-compiler/SKILL.md) — concept descriptions, prompt text, compiler logic, reference ordering, and consistency debugging.
+
+Automatic discovery of `AGENTS.md` and `.agents/skills/` varies by agent and tool. If discovery is unavailable, open and read these files directly from the repository before proceeding; no provider-specific integration is required. Consult the skills when reviewing these areas as well as when implementing them.
 
 ---
 

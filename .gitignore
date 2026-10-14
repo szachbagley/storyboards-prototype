@@ -85,9 +85,9 @@ desktop.ini
 .vercel/
 
 # ---------------------------------------------------------------------------
-# Claude Code
+# Coding-agent resources
 #
-# .claude/skills/ is committed on purpose -- those skills are project
-# documentation. Only machine-local settings are excluded.
+# .agents/skills/ is committed on purpose -- those skills are project
+# documentation. Keep legacy machine-local tool settings excluded.
 # ---------------------------------------------------------------------------
 .claude/settings.local.json

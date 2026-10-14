@@ -256,7 +256,7 @@ The image API is synchronous with no task handle. A dropped connection loses the
 **Input:** the concept's reference image plus a type-specific meta-prompt.
 **Output:** plain text, written into the description field by the client on confirmation.
 
-The meta-prompt differs by concept type — describing a person's costume and describing an architectural space call for different attention. Full prompt text lives in the `nano-banana-prompts` skill, not inline in application code.
+The meta-prompt differs by concept type — describing a person's costume and describing an architectural space call for different attention. The source of truth for the full prompt text is the [storyboard-prompt-compiler skill](.agents/skills/storyboard-prompt-compiler/SKILL.md); application constants are verified against it by fidelity tests.
 
 ### 8.2 The identity-only rule
 
