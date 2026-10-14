@@ -42,7 +42,7 @@ export function Register() {
     } catch (err) {
       // The server validates the Gemini key before creating anything, so a bad
       // key surfaces here rather than on the first generation.
-      setError(err instanceof ApiError ? err.message : "Could not reach the API.");
+      setError(err instanceof ApiError ? describeError(err) : "Could not reach the API.");
       setBusy(false);
     }
   }
@@ -110,4 +110,14 @@ export function Register() {
       </p>
     </form>
   );
+}
+
+/** A validation 400 carries the real reason per field in `details`; the
+ *  top-level message alone ("Request validation failed") names no field. */
+function describeError(err: ApiError): string {
+  if (!Array.isArray(err.details)) return err.message;
+  const reasons = err.details
+    .filter((d): d is { path: string; message: string } => typeof d === "object" && d !== null && "message" in d)
+    .map((d) => `${d.path}: ${d.message}`);
+  return reasons.length > 0 ? reasons.join("; ") : err.message;
 }
