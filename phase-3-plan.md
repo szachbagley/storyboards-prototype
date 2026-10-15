@@ -93,16 +93,16 @@ const interaction = await ai.interactions.create({
 const text = interaction.output_text;
 ```
 
-Constraints that produce hard errors and must not be "improved":
+Project policy and request constraints:
 
-- **No `temperature`, `top_p`, or `top_k`.** Gemini 3.x rejects them outright.
+- **No `temperature`, `top_p`, or `top_k`.** This project deliberately omits them. The original rejection assumption was contradicted by the [probe findings below](#contradicts-the-documentation).
 - **`thinking_level` must be `low`, `medium`, or `high` on `gemini-3.7-flash`.**
   `"minimal"` is valid on the image model but **rejected** here. The constant is
-  already `"low"` in `shared/config.ts`; do not inline a literal.
+  already `"low"` in `shared/src/config.ts`; do not inline a literal.
 - **Text part before image part.** Part order is semantically meaningful. The
   meta-prompt refers to "this image", so the image follows the instruction.
 
-Both model ID and thinking level come from `shared/config.ts` (invariant 9).
+Both model ID and thinking level come from `shared/src/config.ts` (invariant 9).
 No string literals at the call site.
 
 ### 2.3 Where the meta-prompts live
@@ -185,7 +185,7 @@ valid empty description.
 Describe is synchronous from the client's perspective, unlike generation. A hung
 upstream call would hold the connection indefinitely.
 
-**New constant: `DESCRIBE_DEADLINE_MS = 30_000`** in `shared/config.ts`. Text
+**New constant: `DESCRIBE_DEADLINE_MS = 30_000`** in `shared/src/config.ts`. Text
 description on 3.7-flash at `thinking_level: "low"` should take a few seconds;
 30s is generous headroom without being a hang.
 
@@ -231,7 +231,7 @@ present, then known markers in the message, and treat an empty output with no
 error as a refusal candidate rather than a success.
 
 `rate_limited` retries twice with `RATE_LIMIT_BACKOFF_MS` (`[2000, 8000]`),
-already in `shared/config.ts`. It is the only auto-retrying code (§8.6). Total
+already in `shared/src/config.ts`. It is the only auto-retrying code (§8.6). Total
 worst case is ~10s of backoff inside the 30s budget, so the deadline still
 governs.
 
@@ -345,7 +345,7 @@ these results.** Delete the script.
 
 Promote `GEMINI_API_KEY` to required in `env.ts` (already present in
 `server/.env`). Confirm fail-fast when it is absent. Add
-`DESCRIBE_DEADLINE_MS` to `shared/config.ts`.
+`DESCRIBE_DEADLINE_MS` to `shared/src/config.ts`.
 
 ### Step 3 — `services/descriptionPrompts.ts` and its fidelity test
 
@@ -512,7 +512,7 @@ against these, not against recollection.**
 ### Contradicts the documentation
 
 - **`temperature`, `top_p` and `top_k` are ACCEPTED** inside `generation_config`
-  by `gemini-3.7-flash`. The skill and `CLAUDE.md` state that Gemini 3.x rejects
+  by `gemini-3.7-flash`. The skill and `CLAUDE.md` originally stated that Gemini 3.x rejects
   them. They are not merely tolerated-and-ignored: `generation_config` validates
   its keys strictly (`{ not_a_real_param: 123 }` returns
   `400 Unknown parameter 'not_a_real_param' at 'generation_config'`), so the API
@@ -523,7 +523,7 @@ against these, not against recollection.**
   the claim does not hold for either. Question closed.
 - **Behaviour is unchanged regardless:** this project sends none of them. The
   operative instruction ("do not add them") stands; only the stated reason
-  ("sending them errors") is inaccurate for the text model.
+  ("sending them errors") was contradicted for both tested models. Current guidance now distinguishes that observation from the unchanged project policy.
 
 ### Not covered by the documentation
 
@@ -573,7 +573,7 @@ enabled on Google Cloud project `310235093712`.
 `gemini-3.1-flash-image` succeeded in 9.65s and returned a **1376x768 JPEG** —
 exactly the dimensions the skill documents for `1K` at `16:9`, which
 independently confirms the `image_size` and `aspect_ratio` values in
-`shared/config.ts`. Phase 6 is unblocked.
+`shared/src/config.ts`. Phase 6 is unblocked.
 
 ---
 

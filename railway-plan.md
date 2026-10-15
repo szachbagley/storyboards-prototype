@@ -2,11 +2,13 @@
 
 > Historical implementation record. References to `CLAUDE.md` and `.claude/skills/` describe the original layout. For current contribution instructions, read [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and the skills linked from AGENTS.md.
 
-**Status:** ready to execute
+**Status:** historical implementation record; execution notes below
 **Scope:** PostgreSQL and the Node API on Railway. The client goes to Vercel separately.
 **Written:** 2026-08-19
 
 ---
+
+The shared `APP_SECRET`, server-wide `GEMINI_API_KEY`, and initial CLI deployment steps below belong to the original implementation, not the current setup. Accounts now use per-user encrypted keys; see [TECH_SPEC.md §10](TECH_SPEC.md#10-authentication) and [§11](TECH_SPEC.md#11-configuration). Current contribution and deployment approval rules are in [CONTRIBUTING.md](CONTRIBUTING.md#merge-and-deployment-are-approval-gates). Do not replay historical setup commands or treat recorded approvals as authorization.
 
 ## 1. Goal and exit criteria
 
