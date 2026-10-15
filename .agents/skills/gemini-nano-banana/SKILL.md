@@ -48,12 +48,16 @@ For text and image *understanding* (not generation), use **`gemini-3.7-flash`**.
 
 ---
 
+## Credential scope
+
+The examples below demonstrate the SDK request shape. Generic SDK examples that read `GEMINI_API_KEY` from the environment do not override this application's per-user credential design. In this repository, construct the client with `new GoogleGenAI({ apiKey })` using the caller's decrypted key, only on the server. Do not add a server-wide key fallback or return stored keys to the browser. See [AGENTS.md](../../../AGENTS.md#architectural-invariants).
+
 ## Text-to-image
 
 ```ts
 import { GoogleGenAI } from "@google/genai";
 
-const ai = new GoogleGenAI({});  // reads GEMINI_API_KEY
+const ai = new GoogleGenAI({ apiKey }); // caller's key, supplied server-side
 
 const interaction = await ai.interactions.create({
   model: "gemini-3.1-flash-image",
@@ -134,9 +138,9 @@ If `aspect_ratio` is omitted the model matches the input image's ratio, or defau
 
 ---
 
-## Parameters that error
+## Parameter policy and constraints
 
-- **`temperature`, `top_p`, `top_k`** — rejected by Gemini 3.x. Remove them.
+- **`temperature`, `top_p`, `top_k`** — deliberately omitted by this project; do not add them. [Historical probes](../../../phase-3-plan.md#contradicts-the-documentation) recorded acceptance inside `generation_config` for both project models. That observation does not establish support for every model or request location; the omission is a project policy, not a blanket API-rejection claim.
 - **Prefilled model turns** — no longer supported.
 - **`thinking_level: "minimal"`** — valid on `gemini-3.1-flash-image` (and is its default) but **rejected by `gemini-3.7-flash`**, which accepts only `low`, `medium` (default), and `high`.
 

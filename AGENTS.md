@@ -47,7 +47,7 @@ Use `ai.interactions.create({ ... })`. Do **not** use `generateContent`, `getGen
 
 ```ts
 import { GoogleGenAI } from "@google/genai";
-const ai = new GoogleGenAI({});   // reads GEMINI_API_KEY from env
+const ai = new GoogleGenAI({ apiKey }); // caller's key, supplied server-side
 
 const interaction = await ai.interactions.create({
   model: "gemini-3.1-flash-image",
@@ -70,10 +70,10 @@ const interaction = await ai.interactions.create({
 
 Do not substitute `gemini-2.5-flash-image`, `gemini-1.5-*`, `gemini-2.0-*`, or any Imagen model. If you believe a model ID is wrong, ask — do not silently swap it.
 
-### Parameter gotchas that produce hard errors
+### Request conventions and parameter constraints
 
 - `image_size` is **case-sensitive**. `"1K"` works, `"1k"` is rejected.
-- Gemini 3.x models **reject** `temperature`, `top_p`, and `top_k`. Do not add them.
+- This project deliberately omits `temperature`, `top_p`, and `top_k`; do not add them. Historical probes recorded acceptance inside `generation_config` for both project models (see [phase 3 probe findings](phase-3-plan.md#contradicts-the-documentation)), so omission is a project policy, not a blanket claim of API rejection.
 - Thinking is on by default for 3.1 Flash Image and cannot be disabled. Thinking tokens are billed.
 - Input parts use `{ type: "text", text }` and `{ type: "image", mime_type, data }` where `data` is base64. Not `inlineData`, not `parts`, not `fileData`.
 - Read the result from `interaction.output_image.data` (base64) and `interaction.id`.
@@ -86,7 +86,7 @@ When in doubt about the Gemini surface, consult the `gemini-nano-banana` skill r
 
 Violating any of these is a bug even if the code runs.
 
-**1. The API key never reaches the client.** All Gemini traffic originates from the Railway server. There is no scenario in this project where the client calls Google directly.
+**1. The backend never returns stored API keys to the client.** All Gemini traffic originates from the Railway server. There is no scenario in this project where the client calls Google directly.
 
 **2. The backend owns the Gemini call end to end.** The image API is synchronous with no task handle — a dropped connection loses the image and still bills. Never stream or proxy a live Gemini request through to the browser. Persist to S3 the moment bytes arrive.
 
@@ -102,7 +102,7 @@ Violating any of these is a bug even if the code runs.
 
 **8. Generations append, never overwrite.** `frames.selected_generation_id` points at the chosen one. Regenerating adds a row. A worse result must never destroy a better one.
 
-**9. Constants live in `shared/config.ts`.** `ASPECT_RATIO`, `IMAGE_SIZE`, model IDs, `MAX_CHARACTER_CONCEPTS`, `MAX_TOTAL_CONCEPTS`, `POLL_INTERVAL_MS`. These are code, not environment variables. No string literals scattered through call sites.
+**9. Constants live in `shared/src/config.ts`.** `ASPECT_RATIO`, `IMAGE_SIZE`, model IDs, `MAX_CHARACTER_CONCEPTS`, `MAX_TOTAL_CONCEPTS`, `POLL_INTERVAL_MS`. These are code, not environment variables. No string literals scattered through call sites.
 
 **10. Every query touching user data filters by the authenticated user.** A missing `WHERE user_id` does not error — it silently serves one account's work to another. Ownership for frames and generations is transitive: frame → story → user. Another user's row returns `404`, never `403`, so endpoints are not existence oracles.
 
@@ -127,7 +127,7 @@ Violating any of these is a bug even if the code runs.
 
 `server/src/services/promptCompiler.ts` must be a **pure function**. Inputs in, `{ prompt: string, parts: InputPart[] }` out. No database access, no S3 calls, no network, no clock.
 
-This is the interesting surface of the project and the one component worth real tests. It is also the thing most likely to break silently. Keep it testable.
+This is the interesting surface of the project and a priority for focused tests (see the five areas below). It is also the thing most likely to break silently. Keep it testable.
 
 ---
 

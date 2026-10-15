@@ -1,7 +1,7 @@
 # Storyboard Prototype — Technical Specification
 
 **Status:** Draft v1
-**Last updated:** 2026-08-18
+**Last updated:** 2026-10-15
 
 ---
 
@@ -47,7 +47,7 @@ This is a **rough proof-of-concept** built as a rapid AI-development exercise. S
 
 | Deferred | Rationale |
 |---|---|
-| Spend controls / quotas | Single trusted user |
+| Spend controls / quotas | Deliberately outside this prototype's scope; each account supplies its own Gemini key |
 | Story-level styling | User expresses style inline in each frame description |
 | Per-story aspect ratio | One global constant: 16:9 |
 | Sequential frame continuity (`previous_interaction_id` chaining) | Adds order-dependence between frames |
@@ -81,7 +81,7 @@ One attempt at rendering a frame. Frames accumulate generations; regenerating ne
 
 ## 5. Database schema
 
-See also `002_identity.sql`, which adds `users` and `sessions` and the
+See also [server/migrations/002_identity.sql](server/migrations/002_identity.sql), which adds `users` and `sessions` and the
 `user_id` columns on `concepts` and `stories`.
 
 ```sql
@@ -179,7 +179,7 @@ Frame *labels* ("Frame 1", "Frame 7") are derived at render time from position o
 
 ## 6. API surface
 
-All routes are prefixed `/api` and require the auth header described in §10.
+All routes are prefixed `/api`. Health, registration, and login are public; user-data routes require the bearer session token described in §10.
 
 ### Concepts
 
@@ -223,7 +223,7 @@ All routes are prefixed `/api` and require the auth header described in §10.
 
 ## 7. Generation pipeline
 
-No queue, no Redis. Single user, single process.
+No queue, no Redis. A single API process serves multiple accounts; all user-data operations remain scoped to the authenticated owner.
 
 1. `POST /frames/:id/generate` loads the frame with its concepts, validates (§8.3), compiles the prompt (§8.4), inserts a `generations` row with `status='pending'` and the compiled prompt and snapshot already written.
 2. The handler returns `202 { generationId }` immediately and fires the Gemini call without awaiting it.
@@ -334,7 +334,7 @@ const interactionId = interaction.id;
 Notes:
 
 - `image_size` is case-sensitive. `"1k"` is rejected; `"1K"` is correct.
-- Gemini 3.x models do **not** accept `temperature`, `top_p`, or `top_k`. Sending them errors.
+- This project deliberately omits `temperature`, `top_p`, and `top_k`; do not add them. Historical probes recorded acceptance inside `generation_config` for both project models (see [phase 3 probe findings](phase-3-plan.md#contradicts-the-documentation)), so omission is a project policy, not a blanket claim of API rejection.
 - Thinking is enabled by default on 3.1 Flash Image at `minimal` and cannot be disabled. Thinking tokens are billed.
 - Every generated image carries a SynthID watermark. Worth noting in the UI if these ever leave the app.
 
@@ -439,7 +439,7 @@ to re-enter them.
 | `S3_BUCKET` | API | |
 | `VITE_API_BASE_URL` | Client | Railway API origin |
 
-There is no server-wide Gemini key. Each request uses the caller's own key, decrypted server-side; no key is ever exposed to the client, and all Gemini traffic originates from the Railway backend.
+There is no server-wide Gemini key. Each request uses the caller's own key, decrypted server-side; stored keys are never returned to the client, and all Gemini traffic originates from the Railway backend. Users submit their own keys through registration or Settings.
 
 Application constants (model IDs, `ASPECT_RATIO = "16:9"`, `IMAGE_SIZE = "1K"`, `MAX_CHARACTER_CONCEPTS = 4`, `MAX_TOTAL_CONCEPTS = 10`, `POLL_INTERVAL_MS = 2000`) live in a single shared module, not in environment variables — they are code, not deployment config.
 
@@ -451,7 +451,9 @@ Application constants (model IDs, `ASPECT_RATIO = "16:9"`, `IMAGE_SIZE = "1K"`, 
 
 | Route | View |
 |---|---|
-| `/login` | Secret entry |
+| `/login` | Username and password sign-in |
+| `/register` | Account creation with username, password, Gemini key, and optional invite code |
+| `/settings` | Update password or Gemini key |
 | `/concepts` | Concept grid with a leading "+" tile |
 | `/concepts/:id` | Reference image, upload control, description textarea, "Generate Description" |
 | `/stories` | Story grid with a leading "+" tile |
@@ -492,13 +494,15 @@ Step 5 before step 6 is deliberate. The compiler is the interesting surface of t
 
 ## 14. Testing
 
-Minimal but non-zero. Three areas justify tests in a prototype this size:
+Minimal but non-zero. Five areas justify tests in a prototype this size, as specified in [AGENTS.md](AGENTS.md#testing):
 
 - **Prompt compiler** — enumeration order matches part order; missing-image concepts are handled; frame description passes through verbatim and unmodified.
 - **Validation** — character and total concept caps.
 - **Position arithmetic** — insert between, append, reorder.
+- **Prompt fidelity** — description meta-prompts and frame prompt constants remain byte-identical to the storyboard-prompt-compiler skill.
+- **Credential handling** — password hash/verify, session token generation/hashing, and Gemini key encrypt/decrypt.
 
-Everything else is exercised by using the app.
+Ownership isolation is verified with a scripted two-account matrix against a live database, not unit tests. Everything else is exercised by using the app; do not add CRUD-handler tests.
 
 ---
 
