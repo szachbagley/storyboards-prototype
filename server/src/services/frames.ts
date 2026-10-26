@@ -88,13 +88,12 @@ export async function getFrame(id: string, userId: string): Promise<FrameDto> {
 }
 
 export async function createFrame(storyId: string, userId: string, body: CreateFrameBody): Promise<FrameDto> {
-  if (!(await storiesDb.storyExists(storyId, userId))) {
-    throw new AppError(404, "not_found", `No story with id ${storyId}`);
-  }
-
   // Reading max(position) and inserting must not interleave with another
   // append, or two frames land on the same position.
   const id = await withTransaction(async (client) => {
+    if (!(await storiesDb.lockStoryForUpdate(client, storyId, userId))) {
+      throw new AppError(404, "not_found", `No story with id ${storyId}`);
+    }
     const max = await framesDb.maxPositionInStory(client, storyId, userId);
     return framesDb.insertFrame(client, storyId, userId, appendPosition(max), body.description ?? "");
   });
@@ -104,10 +103,21 @@ export async function createFrame(storyId: string, userId: string, body: CreateF
 }
 
 export async function updateFrame(id: string, userId: string, body: UpdateFrameBody): Promise<FrameDto> {
+  const storyId = await framesDb.getOwnedFrameStoryId(id, userId);
+  if (!storyId) throw frameNotFound(id);
   await withTransaction(async (client) => {
+    if (!(await storiesDb.lockStoryForUpdate(client, storyId, userId)) ||
+        !(await framesDb.lockOwnedFrameForUpdate(client, id, storyId, userId))) throw frameNotFound(id);
+    // The schema is additive, but enabling a non-null source before the
+    // compiler/storage packages would silently generate without continuity.
+    if (body.continuitySourceFrameId) {
+      throw new AppError(422, "continuity_unavailable", "Source-frame continuity is not available yet.");
+    }
     const updated = await framesDb.updateFrameFields(client, id, userId, {
       ...(body.description !== undefined ? { description: body.description } : {}),
       ...(body.position !== undefined ? { position: body.position } : {}),
+      ...(body.continuitySourceFrameId !== undefined
+        ? { continuitySourceFrameId: body.continuitySourceFrameId } : {}),
     });
     if (!updated) throw frameNotFound(id);
 
@@ -124,7 +134,7 @@ export async function updateFrame(id: string, userId: string, body: UpdateFrameB
           `Unknown concept id${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}`,
         );
       }
-      await framesDb.replaceFrameConcepts(client, id, body.conceptIds);
+      await framesDb.replaceFrameConcepts(client, id, body.conceptIds, userId);
     }
   });
 
@@ -132,10 +142,17 @@ export async function updateFrame(id: string, userId: string, body: UpdateFrameB
 }
 
 export async function deleteFrame(id: string, userId: string): Promise<void> {
-  // Collected before the delete: the rows cascade away and their keys with them.
-  const imageKeys = await generationsDb.imageKeysForFrame(id, userId);
-
-  if (!(await framesDb.deleteFrame(id, userId))) throw frameNotFound(id);
+  const storyId = await framesDb.getOwnedFrameStoryId(id, userId);
+  if (!storyId) throw frameNotFound(id);
+  // Collect and delete under the same story lock as finalization. Storage work
+  // follows COMMIT; a late runner sees no row and cleans its own new output.
+  const imageKeys = await withTransaction(async (client) => {
+    if (!(await storiesDb.lockStoryForUpdate(client, storyId, userId)) ||
+        !(await framesDb.lockOwnedFrameForUpdate(client, id, storyId, userId))) throw frameNotFound(id);
+    const keys = await generationsDb.imageKeysForFrame(client, id, storyId, userId);
+    if (!(await framesDb.deleteFrame(client, id, userId))) throw frameNotFound(id);
+    return keys;
+  });
 
   // Best effort, matching the concept-delete precedent: the rows are already
   // gone, so a failed object delete must not fail the request. There is no
