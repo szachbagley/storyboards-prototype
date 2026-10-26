@@ -6,13 +6,19 @@ const permitted = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 globalThis.__package1Outbound = { blocked: 0 };
 const originalConnect = net.Socket.prototype.connect;
 net.Socket.prototype.connect = function (...args) {
-  const target = args[0];
-  const host = typeof target === "object" && target !== null
-    ? (target.host ?? target.hostname ?? (target.path ? "localhost" : ""))
-    : typeof args[1] === "string" ? args[1] : "";
-  // net.connect(port) and some local fetch clients omit host; Node defaults
-  // those calls to loopback. Keep the same default while denying named hosts.
-  if (host !== "" && !permitted.has(host)) {
+  // net.connect() and the HTTP clients pass [options, callback] as a single
+  // normalized argument. Inspect its options rather than treating the array
+  // as an object with a missing host (which would allow every destination).
+  const parameters = Array.isArray(args[0]) ? args[0] : args;
+  const target = parameters[0];
+  let host;
+  if (typeof target === "object" && target !== null && !target.path && target.port !== undefined) {
+    host = target.host || target.hostname || "localhost";
+  } else if (typeof target === "number") {
+    host = typeof parameters[1] === "string" ? parameters[1] : "localhost";
+  }
+  // Unknown forms and Unix sockets are unnecessary for this TCP fixture.
+  if (!permitted.has(host)) {
     globalThis.__package1Outbound.blocked += 1;
     throw new Error("offline fixture blocked a non-loopback socket");
   }

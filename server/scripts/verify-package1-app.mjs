@@ -6,6 +6,11 @@ import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 
+const watchdog = setTimeout(() => {
+  console.error("offline app: fixture exceeded 30 seconds");
+  process.exit(1);
+}, 30_000);
+watchdog.unref();
 if (!globalThis.__package1Outbound) throw new Error("offline network guard was not preloaded");
 const url = new URL(process.env.PACKAGE1_TEST_DATABASE_URL ?? "postgres://invalid@invalid/");
 if (!["127.0.0.1", "localhost"].includes(url.hostname) ||
@@ -16,7 +21,7 @@ const admin = new pg.Client({ connectionString: url.toString() });
 await admin.connect();
 await admin.query("DROP SCHEMA IF EXISTS pkg1_app CASCADE");
 await admin.query("CREATE SCHEMA pkg1_app");
-url.searchParams.set("options", "-c search_path=pkg1_app");
+url.searchParams.set("options", "-c search_path=pkg1_app -c statement_timeout=5000 -c lock_timeout=2000");
 const db = new pg.Client({ connectionString: url.toString() });
 await db.connect();
 for (const name of ["001_init.sql", "002_identity.sql", "003_frame_continuity.sql"]) {
@@ -61,12 +66,47 @@ const { createApp } = await import("../dist/app.js");
 const { pool } = await import("../dist/db/pool.js");
 const { sweepStale } = await import("../dist/db/generations.js");
 let commitFault = null;
+let rollbackFault = false;
+let faultedClient = null;
+let recoveryReads = 0;
+let bypassPendingChecks = false;
+let collideGenerationId = null;
 const originalPgQuery = pg.Client.prototype.query;
 pg.Client.prototype.query = function (...args) {
+  if (bypassPendingChecks && typeof args[0] === "string" &&
+      args[0].trimStart().startsWith("SELECT") && args[0].includes("g.status = 'pending'")) {
+    const result = { rows: [], rowCount: 0 };
+    const callback = args.at(-1);
+    if (typeof callback === "function") { callback(null, result); return; }
+    return Promise.resolve(result);
+  }
+  if (typeof args[0] === "string" && args[0].startsWith("INSERT INTO generations")) {
+    if (collideGenerationId) {
+      args[1] = [...args[1]];
+      args[1][0] = collideGenerationId;
+      collideGenerationId = null;
+    }
+    return originalPgQuery.apply(this, args).catch((error) => {
+      bypassPendingChecks = false;
+      throw error;
+    });
+  }
+  if (args[0] === "ROLLBACK" && rollbackFault) {
+    rollbackFault = false;
+    return Promise.reject(new Error("fixture: rollback failed"));
+  }
+  if (faultedClient && typeof args[0] === "string" &&
+      args[0].startsWith('SELECT status, image_key AS "imageKey"')) {
+    assert.notEqual(this, faultedClient, "uncertain transaction connection was reused for recovery");
+    recoveryReads += 1;
+  }
   if (args[0] === "COMMIT" && commitFault) {
     const fault = commitFault;
     commitFault = null;
-    if (fault === "before") return Promise.reject(new Error("fixture: COMMIT not sent"));
+    faultedClient = this;
+    recoveryReads = 0;
+    if (fault === "rollback_failure") rollbackFault = true;
+    if (fault !== "after") return Promise.reject(new Error("fixture: COMMIT not sent"));
     return Promise.resolve(originalPgQuery.apply(this, args)).then(() => {
       throw new Error("fixture: COMMIT acknowledged late");
     });
@@ -79,6 +119,7 @@ const base = `http://127.0.0.1:${server.address().port}/api`;
 const request = async (method, path, token, body, expected) => {
   const response = await fetch(base + path, {
     method,
+    signal: AbortSignal.timeout(5000),
     headers: { ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...(body !== undefined ? { "content-type": "application/json" } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -141,6 +182,12 @@ try {
     { requestId: "df545638-2f2e-45d6-83a5-73bb7bf0f0be" }, 409);
   assert.equal(conflict.error.code, "generation_in_progress");
   assert.equal(conflict.error.details.generationId, started.generationId);
+  // Simulate a writer missing both pending checks. The real database index
+  // must still reject it, and the service must query only after rollback.
+  bypassPendingChecks = true;
+  const indexedConflict = await request("POST", `/frames/${frame.id}/generate`, a.token,
+    { requestId: "5d173161-239e-4420-8292-13ad7ab56a45" }, 409);
+  assert.equal(indexedConflict.error.details.generationId, started.generationId);
   assert.equal(state.calls.generate, 1);
   const detail = await request("GET", `/frames/${frame.id}`, a.token, undefined, 200);
   const poll = await request("GET", `/generations/${started.generationId}`, a.token, undefined, 200);
@@ -173,6 +220,7 @@ try {
     { description: "overlap fixture" }, 201);
   await request("PATCH", `/frames/${overlap.id}`, a.token, { conceptIds: [concept.id] }, 200);
   const readsBefore = state.calls.get;
+  const dispatchesBeforeOverlap = state.calls.generate;
   const overlapGate = gate();
   const generationGate = gate();
   state.getGate = overlapGate.promise;
@@ -187,12 +235,44 @@ try {
   state.getGate = null;
   const [firstOverlap, secondOverlap] = await Promise.all([requestOne, requestTwo]);
   assert.equal(firstOverlap.generationId, secondOverlap.generationId);
+  assert.equal(state.calls.generate, dispatchesBeforeOverlap + 1);
   assert.equal((await db.query("SELECT count(*)::int AS count FROM generations WHERE frame_id = $1",
     [overlap.id])).rows[0].count, 1);
   generationGate.release();
   state.gate = null;
   await waitFor(async () => (await status(firstOverlap.generationId)).status === "succeeded");
   console.log("offline app: overlapping same-request preflights admitted one runner");
+
+  const primaryKeyFrame = await request("POST", `/stories/${storyA.id}/frames`, a.token,
+    { description: "unrelated constraint fixture" }, 201);
+  collideGenerationId = started.generationId;
+  const primaryKeyFailure = await request("POST", `/frames/${primaryKeyFrame.id}/generate`, a.token,
+    { requestId: "7a3708b7-5f7e-4741-8833-4cd228a48a94" }, 500);
+  assert.equal(primaryKeyFailure.error.code, "internal_error");
+  console.log("offline app: named admission index mapped after rollback; unrelated uniqueness not remapped");
+
+  // A distinct intention whose preflight finishes after the first attempt is
+  // terminal is a new admitted call, not an exactly-once guarantee.
+  const staggered = await request("POST", `/stories/${storyA.id}/frames`, a.token,
+    { description: "staggered preflight fixture" }, 201);
+  await request("PATCH", `/frames/${staggered.id}`, a.token, { conceptIds: [concept.id] }, 200);
+  const readsBeforeStagger = state.calls.get;
+  const dispatchesBeforeStagger = state.calls.generate;
+  const latePreflight = gate();
+  state.getGate = latePreflight.promise;
+  const delayed = request("POST", `/frames/${staggered.id}/generate`, a.token,
+    { requestId: "ca887c6f-d851-4639-bbee-5270e7c79409" }, 202);
+  await waitFor(() => state.calls.get > readsBeforeStagger);
+  state.getGate = null;
+  const early = await request("POST", `/frames/${staggered.id}/generate`, a.token,
+    { requestId: "d50a5bca-ec08-4c51-a403-7562066a2c77" }, 202);
+  await waitFor(async () => (await status(early.generationId)).status === "succeeded");
+  latePreflight.release();
+  const late = await delayed;
+  await waitFor(async () => (await status(late.generationId)).status === "succeeded");
+  assert.notEqual(early.generationId, late.generationId);
+  assert.equal(state.calls.generate, dispatchesBeforeStagger + 2);
+  console.log("offline app: delayed distinct-request preflight correctly admitted a second attempt");
 
   const uncertainAdmissionFrame = await request("POST", `/stories/${storyA.id}/frames`, a.token,
     { description: "admission acknowledgement fixture" }, 201);
@@ -204,6 +284,7 @@ try {
   assert.equal(uncertainAdmission.error.code, "admission_uncertain");
   const admittedId = uncertainAdmission.error.details.generationId;
   assert.equal((await status(admittedId)).status, "pending");
+  assert.ok(recoveryReads > 0);
   assert.equal(state.calls.generate, dispatchesBeforeAdmission);
   await db.query("UPDATE generations SET created_at = now() - interval '10 minutes' WHERE id = $1",
     [admittedId]);
@@ -243,26 +324,31 @@ try {
   assert.equal((await status(rejected.generationId)).error_code, "invalid_api_key");
   console.log("offline app: invalid_api_key retained in shared terminal taxonomy");
 
-  for (const fault of ["after", "before"]) {
+  const faultRequestIds = {
+    after: "29919f8c-079e-4e06-8456-7135cd8e0192",
+    before: "ca8d1063-6c65-458c-b83d-23aa70b20bd0",
+    rollback_failure: "eeb91660-cb3c-45db-9a74-7253c0d00ac0",
+  };
+  for (const fault of Object.keys(faultRequestIds)) {
     const uncertainFrame = await request("POST", `/stories/${storyA.id}/frames`, a.token,
       { description: "uncertain commit fixture" }, 201);
     const uncertainHold = gate();
     state.gate = uncertainHold.promise;
     const uncertain = await request("POST", `/frames/${uncertainFrame.id}/generate`, a.token,
-      { requestId: fault === "after"
-        ? "29919f8c-079e-4e06-8456-7135cd8e0192"
-        : "ca8d1063-6c65-458c-b83d-23aa70b20bd0" }, 202);
+      { requestId: faultRequestIds[fault] }, 202);
     const dispatches = state.calls.generate;
+    recoveryReads = 0;
     commitFault = fault;
     uncertainHold.release();
     state.gate = null;
+    await waitFor(() => recoveryReads > 0);
     await waitFor(async () => (await status(uncertain.generationId)).status === "succeeded");
     assert.equal(state.calls.generate, dispatches);
     assert.equal(state.objects.has(`generations/${uncertain.generationId}.jpg`), true);
     assert.equal((await db.query("SELECT selected_generation_id FROM frames WHERE id = $1",
       [uncertainFrame.id])).rows[0].selected_generation_id, uncertain.generationId);
   }
-  console.log("offline app: lost and rolled-back finalization COMMIT kept one dispatch and saved output");
+  console.log("offline app: lost COMMIT and rollback failure recovered on fresh connections with one dispatch and saved output");
 
   const sweptFrame = await request("POST", `/stories/${storyA.id}/frames`, a.token,
     { description: "sweep fixture" }, 201);
@@ -318,4 +404,5 @@ try {
   await db.end();
   await admin.query("DROP SCHEMA IF EXISTS pkg1_app CASCADE");
   await admin.end();
+  clearTimeout(watchdog);
 }

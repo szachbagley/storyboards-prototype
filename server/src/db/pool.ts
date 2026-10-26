@@ -37,15 +37,26 @@ export function query<T extends QueryResultRow>(
  */
 export async function withTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
+  let committing = false;
+  let discardClient = false;
   try {
     await client.query("BEGIN");
     const result = await fn(client);
+    committing = true;
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query("ROLLBACK");
+    // An uncertain COMMIT must be resolved on another connection. Likewise,
+    // a failed rollback can leave a live/aborted transaction in this session;
+    // returning it to the pool could make a later read see uncommitted data.
+    discardClient = committing;
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      discardClient = true;
+    }
     throw err;
   } finally {
-    client.release();
+    client.release(discardClient);
   }
 }

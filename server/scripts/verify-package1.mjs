@@ -5,6 +5,11 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 
+const watchdog = setTimeout(() => {
+  console.error("SQL fixture exceeded 30 seconds");
+  process.exit(1);
+}, 30_000);
+watchdog.unref();
 const url = new URL(process.env.PACKAGE1_TEST_DATABASE_URL ?? "postgres://invalid@invalid/");
 if (!["127.0.0.1", "localhost"].includes(url.hostname) ||
     url.pathname !== "/storyboards_pkg1_test") {
@@ -16,7 +21,7 @@ await admin.connect();
 await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
 await admin.query(`CREATE SCHEMA ${schema}`);
 const pool = new pg.Pool({ connectionString: url.toString(), max: 4,
-  options: `-c search_path=${schema}` });
+  options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=2000` });
 const sql = (await Promise.all(["001_init.sql", "002_identity.sql", "003_frame_continuity.sql"]
   .map((name) => readFile(fileURLToPath(new URL(`../migrations/${name}`, import.meta.url)), "utf8"))));
 
@@ -70,6 +75,10 @@ try {
     [schema]);
   assert.equal(noColumn.rowCount, 0);
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM generations")).rows[0].count, 2);
+  assert.equal((await pool.query("SELECT count(*)::int AS count FROM generations WHERE status = 'pending'")).rows[0].count, 2);
+  assert.equal((await pool.query(
+    "SELECT count(*)::int AS count FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'generations' AND column_name = 'request_id'",
+    [schema])).rows[0].count, 0);
   console.log("migration: duplicate pending abort rolled back without data loss");
 
   // This is disposable fixture data, not a repair of any live pending work.
@@ -168,4 +177,5 @@ try {
   await pool.end();
   await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
   await admin.end();
+  clearTimeout(watchdog);
 }
