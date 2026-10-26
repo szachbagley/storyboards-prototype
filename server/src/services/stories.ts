@@ -3,6 +3,7 @@ import * as db from "../db/stories.js";
 import * as generationsDb from "../db/generations.js";
 import type { StoryRow } from "../db/stories.js";
 import { AppError } from "../lib/AppError.js";
+import { withTransaction } from "../db/pool.js";
 import { deleteObject, getPresignedUrl } from "./s3.js";
 
 async function toDto(row: StoryRow): Promise<StoryDto> {
@@ -40,10 +41,12 @@ export async function updateStory(id: string, userId: string, title: string): Pr
 }
 
 export async function deleteStory(id: string, userId: string): Promise<void> {
-  // Collected before the delete: frames and their generation rows cascade away.
-  const imageKeys = await generationsDb.imageKeysForStory(id, userId);
-
-  if (!(await db.deleteStory(id, userId))) throw notFound(id);
+  const imageKeys = await withTransaction(async (client) => {
+    if (!(await db.lockStoryForUpdate(client, id, userId))) throw notFound(id);
+    const keys = await generationsDb.imageKeysForStory(client, id, userId);
+    if (!(await db.deleteStory(client, id, userId))) throw notFound(id);
+    return keys;
+  });
 
   // Best effort -- the rows are already gone, so a failed object delete must
   // not fail the request.

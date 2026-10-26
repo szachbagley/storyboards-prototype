@@ -87,11 +87,20 @@ export const UpdateFrameSchema = z
       })
       .optional(),
     position: z.number().finite().optional(),
+    continuitySourceFrameId: z.uuid().nullable().optional(),
   })
   .refine((body) => Object.keys(body).length > 0, {
     message: "At least one field must be provided",
   });
 export type UpdateFrameBody = z.infer<typeof UpdateFrameSchema>;
+
+/** Generation request identity is optional for existing bodyless clients.
+ * A source expectation becomes active when the continuity service lands. */
+export const GenerateFrameSchema = z.object({
+  requestId: z.uuid().optional(),
+  expectedContinuitySourceFrameId: z.uuid().nullable().optional(),
+});
+export type GenerateFrameBody = z.infer<typeof GenerateFrameSchema>;
 
 /** POST /frames/:id/select-generation */
 export const SelectGenerationSchema = z.object({

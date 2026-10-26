@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { SelectGenerationSchema, UpdateFrameSchema, UuidParamSchema } from "@storyboards/shared";
+import { GenerateFrameSchema, SelectGenerationSchema, UpdateFrameSchema, UuidParamSchema } from "@storyboards/shared";
 import { requireUser } from "../middleware/auth.js";
 import * as frames from "../services/frames.js";
 import * as generation from "../services/generation.js";
@@ -21,7 +21,8 @@ framesRouter.patch("/frames/:id", async (req, res) => {
 // because the generation is billed to their own Gemini key.
 framesRouter.post("/frames/:id/generate", async (req, res) => {
   const { id } = UuidParamSchema.parse(req.params);
-  res.status(202).json({ generationId: await generation.startGeneration(id, requireUser(req)) });
+  const body = GenerateFrameSchema.parse(req.body === undefined ? {} : req.body);
+  res.status(202).json({ generationId: await generation.startGeneration(id, requireUser(req), body) });
 });
 
 framesRouter.post("/frames/:id/select-generation", async (req, res) => {

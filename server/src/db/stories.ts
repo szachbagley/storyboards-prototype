@@ -1,3 +1,4 @@
+import type pg from "pg";
 import { query } from "./pool.js";
 
 export interface StoryRow {
@@ -31,7 +32,7 @@ const SELECT_STORIES = `
     SELECT f.selected_generation_id
     FROM frames f
     WHERE f.story_id = s.id
-    ORDER BY f.position ASC
+    ORDER BY f.position ASC, f.id ASC
     LIMIT 1
   ) ff ON true
   LEFT JOIN generations g ON g.id = ff.selected_generation_id
@@ -63,6 +64,20 @@ export async function storyExists(id: string, userId: string): Promise<boolean> 
   return rows[0]?.exists ?? false;
 }
 
+/** The first lock in every story-scoped mutation. Background work already
+ * carries a server-captured story id and may omit the owner argument. */
+export async function lockStoryForUpdate(
+  client: pg.PoolClient,
+  id: string,
+  userId?: string,
+): Promise<boolean> {
+  const { rowCount } = await client.query(
+    `SELECT id FROM stories WHERE id = $1 AND ($2::uuid IS NULL OR user_id = $2) FOR UPDATE`,
+    [id, userId ?? null],
+  );
+  return rowCount === 1;
+}
+
 export async function insertStory(userId: string, title: string): Promise<StoryRow> {
   const { rows } = await query<{ id: string }>(
     "INSERT INTO stories (user_id, title) VALUES ($1, $2) RETURNING id",
@@ -81,7 +96,7 @@ export async function updateStoryTitle(id: string, userId: string, title: string
 }
 
 /** Frames, frame_concepts and generations all cascade from the schema. */
-export async function deleteStory(id: string, userId: string): Promise<boolean> {
-  const { rowCount } = await query("DELETE FROM stories WHERE id = $1 AND user_id = $2", [id, userId]);
+export async function deleteStory(client: pg.PoolClient, id: string, userId: string): Promise<boolean> {
+  const { rowCount } = await client.query("DELETE FROM stories WHERE id = $1 AND user_id = $2", [id, userId]);
   return rowCount === 1;
 }
