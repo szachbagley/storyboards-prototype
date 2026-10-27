@@ -208,15 +208,26 @@ export async function generateImage(apiKey: string, parts: InputPart[]): Promise
  * to the user as "your key is bad".
  */
 export async function validateApiKey(apiKey: string): Promise<boolean> {
+  // Bound response parsing as well as HTTP setup, and prevent a late SDK
+  // success from being persisted after the caller has already timed out.
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(validationTimeout());
+      controller.abort();
+    }, API_KEY_VALIDATION_DEADLINE_MS);
+  });
   try {
-    const interaction = await clientFor(apiKey).interactions.create(
+    const interaction = await Promise.race([clientFor(apiKey).interactions.create(
       {
         model: DESCRIPTION_MODEL,
         input: [{ type: "text", text: "Reply with the single word: ok" }],
         generation_config: { thinking_level: DESCRIPTION_THINKING_LEVEL },
       },
-      { timeout: API_KEY_VALIDATION_DEADLINE_MS, maxRetries: 0 },
-    );
+      { timeout: API_KEY_VALIDATION_DEADLINE_MS, maxRetries: 0,
+        fetchOptions: { signal: controller.signal } },
+    ), deadline]);
     if (interaction.status !== "completed") {
       throw new AppError(502, "upstream_error", "Gemini did not complete key verification. Try again.");
     }
@@ -236,8 +247,11 @@ export async function validateApiKey(apiKey: string): Promise<boolean> {
     if (status === 429) {
       throw new AppError(503, "upstream_error", "Gemini is rate limiting key checks. Try again shortly.");
     }
-    if (status === 504 || (err instanceof Error && err.name === "APIConnectionTimeoutError")) {
-      throw new AppError(504, "timeout", "Gemini key verification timed out. Try again.");
+    // The SDK wraps timeouts before headers arrive, but response body reads
+    // can throw the native fetch TimeoutError directly.
+    if (status === 504 || (err instanceof Error &&
+      (err.name === "APIConnectionTimeoutError" || err.name === "TimeoutError"))) {
+      throw validationTimeout();
     }
     // SDK messages can contain the upstream JSON body. Never log that body or
     // the plaintext key; the status alone is enough for safe diagnostics.
@@ -247,7 +261,13 @@ export async function validateApiKey(apiKey: string): Promise<boolean> {
         "Gemini rejected the verification request. Try again later or contact support if this continues.");
     }
     throw new AppError(502, "upstream_error", "Could not verify the API key right now. Try again.");
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+function validationTimeout(): AppError {
+  return new AppError(504, "timeout", "Gemini key verification timed out. Try again.");
 }
 
 function validationStatus(error: unknown): number | undefined {
@@ -257,9 +277,9 @@ function validationStatus(error: unknown): number | undefined {
   return typeof status === "number" ? status : undefined;
 }
 
-// The Interactions SDK's ApiError stores the JSON response in `message`;
-// newer wrappers may carry it in `body` or `error`. Match the structured
-// ErrorInfo reason, never an arbitrary 400 or a free-text phrase.
+// SDK releases expose JSON in `message` (ApiError) or `body` / `error`
+// (Interactions wrappers). Match the structured ErrorInfo reason, never an
+// arbitrary 400 or a free-text phrase.
 function hasInvalidKeyReason(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const candidate = error as { error?: unknown; body?: unknown; message?: unknown };

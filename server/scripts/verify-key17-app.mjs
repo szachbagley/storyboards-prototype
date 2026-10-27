@@ -99,12 +99,14 @@ try {
   await checkPreserved(structured(403, "PERMISSION_DENIED"), 422, "api_key_access_denied");
   await checkPreserved(structured(429, "RESOURCE_EXHAUSTED"), 503, "upstream_error");
   await checkPreserved(Object.assign(new Error("timeout"), { name: "APIConnectionTimeoutError" }), 504, "timeout");
+  await checkPreserved(new DOMException("timeout", "TimeoutError"), 504, "timeout");
   await checkPreserved(structured(503, "UNAVAILABLE"), 502, "upstream_error");
   fixture.nextStatus = "failed";
   const incomplete = await send("PATCH", "/auth/me", { geminiApiKey: newKey }, token);
   assert.equal(incomplete.status, 502);
   assert.equal(incomplete.body.error.code, "upstream_error");
   assert.deepEqual((await currentRow()).gemini_key_ciphertext, first.gemini_key_ciphertext);
+  fixture.emptyResponse = true;
   const updated = await send("PATCH", "/auth/me", { geminiApiKey: newKey }, token);
   assert.equal(updated.status, 200);
   assert.equal(updated.body.geminiKeyHint, newKey.slice(-4));
@@ -113,10 +115,10 @@ try {
   assert.equal(decryptRow(second), newKey);
   assert.notDeepEqual(second.gemini_key_ciphertext, first.gemini_key_ciphertext);
   assert.ok(fixture.calls.every((call) => call.timeout === 20_000 && call.maxRetries === 0));
-  assert.equal(fixture.calls.length, 9);
-  assert.deepEqual(fixture.keysSeen, [oldKey, ...Array(8).fill(newKey)]);
+  assert.equal(fixture.calls.length, 10);
+  assert.deepEqual(fixture.keysSeen, [oldKey, ...Array(9).fill(newKey)]);
   assert.equal(globalThis.__package1Outbound.blocked, 0);
-  console.log("key17 route: registration, seven safe failures, successful encrypted replacement passed; SDK stub calls=9; real outbound=0");
+  console.log("key17 route: registration, eight safe failures, empty-text success with encrypted replacement passed; SDK stub calls=10; real outbound=0");
 } finally {
   clearTimeout(watchdog);
   if (server) await new Promise((resolve) => server.close(resolve));

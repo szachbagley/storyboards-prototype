@@ -23,7 +23,7 @@ beforeEach(() => {
   create.mockReset();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("account API key validation", () => {
   it("recognizes the structured 400 API_KEY_INVALID response", async () => {
@@ -50,7 +50,17 @@ describe("account API key validation", () => {
     await expect(validateApiKey("dummy-key")).resolves.toBe(false);
     create.mockRejectedValueOnce(Object.assign(new Error("API_KEY_INVALID appears in prose"), { status: 400 }));
     await expect(validateApiKey("dummy-key")).rejects.toMatchObject({ status: 502, code: "upstream_error" });
-    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain("dummy-key");
+  });
+
+  it("never includes key material or raw upstream bodies in errors or logs", async () => {
+    const key = "fixture-secret-sentinel";
+    create.mockRejectedValue(sdkError(503, { error: { message: `rejected ${key}` } }));
+    const error = await validateApiKey(key).catch((error: unknown) => error);
+    expect(error).toMatchObject({ status: 502, code: "upstream_error" });
+    expect(String(error)).not.toContain(key);
+    expect(vi.mocked(console.error).mock.calls).toEqual([
+      ["[gemini] key validation could not complete status=503"],
+    ]);
   });
 
   it("accepts a successful interaction even if it has no output text", async () => {
@@ -63,11 +73,39 @@ describe("account API key validation", () => {
     await expect(validateApiKey("dummy-key")).rejects.toMatchObject({ status: 502, code: "upstream_error" });
   });
 
+  it("bounds the whole call, aborts transport, and ignores a late success", async () => {
+    vi.useFakeTimers();
+    let finish: (result: object) => void = () => {};
+    create.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const result = validateApiKey("dummy-key");
+    const outcome = expect(result).rejects.toMatchObject({ status: 504, code: "timeout" });
+    const signal = create.mock.calls[0]?.[1].fetchOptions.signal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await outcome;
+    expect(signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    finish({ status: "completed" });
+    await expect(result).rejects.toMatchObject({ status: 504, code: "timeout" });
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it("clears the application deadline on both success and failure", async () => {
+    vi.useFakeTimers();
+    create.mockResolvedValueOnce({ status: "completed" });
+    await expect(validateApiKey("dummy-key")).resolves.toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    create.mockRejectedValueOnce(invalidKey);
+    await expect(validateApiKey("dummy-key")).resolves.toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("distinguishes permission, throttling, timeout and outage", async () => {
     for (const [error, expectedStatus, expectedCode] of [
       [sdkError(403, { error: { status: "PERMISSION_DENIED" } }), 422, "api_key_access_denied"],
       [sdkError(429, { error: { status: "RESOURCE_EXHAUSTED" } }), 503, "upstream_error"],
       [Object.assign(new Error("request timed out"), { name: "APIConnectionTimeoutError" }), 504, "timeout"],
+      [new DOMException("request timed out", "TimeoutError"), 504, "timeout"],
       [sdkError(503, { error: { status: "UNAVAILABLE" } }), 502, "upstream_error"],
     ] as const) {
       create.mockRejectedValueOnce(error);

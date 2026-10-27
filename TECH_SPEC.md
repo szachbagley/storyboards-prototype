@@ -427,9 +427,29 @@ accepted even if the model returned no text. An HTTP 400 is an invalid-key
 response only when its structured ErrorInfo reason is `API_KEY_INVALID`; other
 400s may indicate a malformed validation request. Permission, rate-limit,
 timeout, and upstream failures return safe, distinct guidance. A failed check
-leaves any previously saved encrypted key unchanged. Validation uses a 20s SDK
-timeout with automatic retries disabled, and server logs never include the
+leaves any previously saved encrypted key unchanged. Validation enforces a 20s
+application deadline, signals abort to the SDK on expiry, and disables automatic
+retries. The timer is cleared when validation settles. Timeouts before headers
+or while reading the response body return HTTP 504. Server logs never include the
 candidate key or raw upstream response body.
+
+After building, `server/scripts/verify-key17-sdk.mjs` exercises the installed SDK
+over loopback HTTP, including the full 20s timeout and socket cancellation.
+`server/scripts/verify-key17-app.mjs` verifies encrypted persistence using its
+disposable PostgreSQL fixture (`KEY17_TEST_DATABASE_URL`). Run both with
+`node --import ./server/scripts/offline-network-guard.mjs` before the script path;
+they refuse to run without the guard and use only dummy keys.
+
+Local review with `@google/genai` 2.17.1 on Node 24.19.0 and 22.23.2 found a
+remaining cancellation limitation: the application returned 504 at its 20s
+deadline, but the SDK fixture's stalled sockets remained open until its 30s
+watchdog stopped the process. A plain Node fetch probe also reproduced lost
+cancellation after garbage collection; its underlying cause is not established.
+Short-duration probes closed the sockets. The full SDK cancellation matrix is
+therefore a failing check, not evidence of complete transport cleanup. Resolve
+or explicitly review this limitation before deployment; no runtime or SDK
+version change is included here. This does not establish the cause of the
+reported live Settings 502, whose sanitized response is still needed.
 
 Losing `ENCRYPTION_KEY` makes every stored key unrecoverable; users would have
 to re-enter them.
