@@ -428,28 +428,38 @@ response only when its structured ErrorInfo reason is `API_KEY_INVALID`; other
 400s may indicate a malformed validation request. Permission, rate-limit,
 timeout, and upstream failures return safe, distinct guidance. A failed check
 leaves any previously saved encrypted key unchanged. Validation enforces a 20s
-application deadline, signals abort to the SDK on expiry, and disables automatic
-retries. The timer is cleared when validation settles. Timeouts before headers
-or while reading the response body return HTTP 504. Server logs never include the
+application deadline, signals abort to its validation transport on expiry, and
+disables automatic retries. The timer is cleared when validation settles.
+Timeouts before headers or while reading the response body return HTTP 504. Server logs never include the
 candidate key or raw upstream response body.
 
-After building, `server/scripts/verify-key17-sdk.mjs` exercises the installed SDK
-over loopback HTTP, including the full 20s timeout and socket cancellation.
+Account key validation uses a dedicated direct POST to the same
+[`v1beta/interactions` endpoint](https://ai.google.dev/api/interactions-api), with
+the same model, input and thinking level as before. It rejects redirects and
+caps response bodies at 1 MiB. This narrow exception to SDK usage uses Node
+HTTPS to own the request and response streams explicitly, destroys both on
+abort/overflow, and removes its abort listener when settled. The SDK 2.17.1
+request-cloning path lost abort propagation after garbage collection in
+loopback probes on Node 24.19.0 and 22.23.2. Direct fetch also failed body
+cancellation on Node 22.23.2. Native HTTPS avoids those controller chains;
+the full transport matrix passes on both runtimes with forced collection.
+Generation and description still use the SDK; no SDK or runtime upgrade is
+included. The earlier failing SDK fixture is preserved in commit `98abf303`.
+
+After building, `server/scripts/verify-key17-transport.mjs` exercises validation
+over loopback HTTP, including the full 20s deadline, direct transport settlement,
+abort dispatch, body cancellation, oversized responses and redirect rejection.
 `server/scripts/verify-key17-app.mjs` verifies encrypted persistence using its
 disposable PostgreSQL fixture (`KEY17_TEST_DATABASE_URL`). Run both with
 `node --import ./server/scripts/offline-network-guard.mjs` before the script path;
-they refuse to run without the guard and use only dummy keys.
+add `--expose-gc` for the transport fixture to force collection while requests
+are pending. They refuse to run without the guard and use only dummy keys.
+Cancellation checks observe unfinished HTTP/1.1 responses closing, not every
+pooled socket: idle keep-alive connections may remain/reopen. Raw transport
+promises must reject without relying on the application's deadline race.
 
-Local review with `@google/genai` 2.17.1 on Node 24.19.0 and 22.23.2 found a
-remaining cancellation limitation: the application returned 504 at its 20s
-deadline, but the SDK fixture's stalled sockets remained open until its 30s
-watchdog stopped the process. A plain Node fetch probe also reproduced lost
-cancellation after garbage collection; its underlying cause is not established.
-Short-duration probes closed the sockets. The full SDK cancellation matrix is
-therefore a failing check, not evidence of complete transport cleanup. Resolve
-or explicitly review this limitation before deployment; no runtime or SDK
-version change is included here. This does not establish the cause of the
-reported live Settings 502, whose sanitized response is still needed.
+These offline checks do not establish the cause of the reported live Settings
+502, whose sanitized response is still needed, or verify live key/model access.
 
 Losing `ENCRYPTION_KEY` makes every stored key unrecoverable; users would have
 to re-enter them.

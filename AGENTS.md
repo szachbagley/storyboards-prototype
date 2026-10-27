@@ -45,6 +45,11 @@ These are current as of August 2026 and differ from what you likely learned. Do 
 
 Use `ai.interactions.create({ ... })`. Do **not** use `generateContent`, `getGenerativeModel`, or the `@google/generative-ai` package. The correct package is **`@google/genai`**.
 
+Account key validation is a narrow exception: `server/src/services/keyValidationTransport.ts`
+sends a bounded direct POST to the same Interactions endpoint to avoid lost
+abort propagation in the tested SDK request-cloning path. See the credential
+handling section of `TECH_SPEC.md`. Generation and description keep using the SDK.
+
 ```ts
 import { GoogleGenAI } from "@google/genai";
 const ai = new GoogleGenAI({ apiKey }); // caller's key, supplied server-side

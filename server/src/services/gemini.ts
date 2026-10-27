@@ -15,6 +15,7 @@ import {
 import { AppError } from "../lib/AppError.js";
 import type { InputPart } from "./promptCompiler.js";
 import { classifyGeminiError } from "./geminiErrors.js";
+import { requestKeyValidation } from "./keyValidationTransport.js";
 
 // The only module in the project that imports the Gemini SDK.
 //
@@ -208,7 +209,7 @@ export async function generateImage(apiKey: string, parts: InputPart[]): Promise
  * to the user as "your key is bad".
  */
 export async function validateApiKey(apiKey: string): Promise<boolean> {
-  // Bound response parsing as well as HTTP setup, and prevent a late SDK
+  // Bound response parsing as well as HTTP setup, and prevent a late transport
   // success from being persisted after the caller has already timed out.
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -219,15 +220,7 @@ export async function validateApiKey(apiKey: string): Promise<boolean> {
     }, API_KEY_VALIDATION_DEADLINE_MS);
   });
   try {
-    const interaction = await Promise.race([clientFor(apiKey).interactions.create(
-      {
-        model: DESCRIPTION_MODEL,
-        input: [{ type: "text", text: "Reply with the single word: ok" }],
-        generation_config: { thinking_level: DESCRIPTION_THINKING_LEVEL },
-      },
-      { timeout: API_KEY_VALIDATION_DEADLINE_MS, maxRetries: 0,
-        fetchOptions: { signal: controller.signal } },
-    ), deadline]);
+    const interaction = await Promise.race([requestKeyValidation(apiKey, controller.signal), deadline]);
     if (interaction.status !== "completed") {
       throw new AppError(502, "upstream_error", "Gemini did not complete key verification. Try again.");
     }

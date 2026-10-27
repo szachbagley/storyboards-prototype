@@ -40,9 +40,9 @@ try {
   process.env.ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
   globalThis.__key17Fixture = { keysSeen: [], calls: [], nextError: null, nextStatus: null, emptyResponse: false };
   const fixture = globalThis.__key17Fixture;
-  const stubUrl = new URL("./key17-sdk-stub.mjs", import.meta.url).href;
+  const stubUrl = new URL("./key17-validation-stub.mjs", import.meta.url).href;
   registerHooks({ resolve(specifier, context, nextResolve) {
-    if (specifier === "@google/genai" && context.parentURL?.includes("/server/dist/services/gemini.js")) {
+    if (specifier === "./keyValidationTransport.js" && context.parentURL?.includes("/server/dist/services/gemini.js")) {
       return { url: stubUrl, shortCircuit: true };
     }
     return nextResolve(specifier, context);
@@ -114,11 +114,11 @@ try {
   const second = await currentRow();
   assert.equal(decryptRow(second), newKey);
   assert.notDeepEqual(second.gemini_key_ciphertext, first.gemini_key_ciphertext);
-  assert.ok(fixture.calls.every((call) => call.timeout === 20_000 && call.maxRetries === 0));
+  assert.ok(fixture.calls.every((call) => call.hasSignal));
   assert.equal(fixture.calls.length, 10);
   assert.deepEqual(fixture.keysSeen, [oldKey, ...Array(9).fill(newKey)]);
   assert.equal(globalThis.__package1Outbound.blocked, 0);
-  console.log("key17 route: registration, eight safe failures, empty-text success with encrypted replacement passed; SDK stub calls=10; real outbound=0");
+  console.log("key17 route: registration, eight safe failures, empty-text success with encrypted replacement passed; validation stub calls=10; real outbound=0");
 } finally {
   clearTimeout(watchdog);
   if (server) await new Promise((resolve) => server.close(resolve));

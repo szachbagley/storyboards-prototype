@@ -1,11 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const create = vi.hoisted(() => vi.fn());
-vi.mock("@google/genai", () => ({
-  GoogleGenAI: class {
-    interactions = { create };
-  },
-}));
+vi.mock("../src/services/keyValidationTransport.js", () => ({ requestKeyValidation: create }));
 
 import { validateApiKey } from "../src/services/gemini.js";
 
@@ -30,7 +26,7 @@ describe("account API key validation", () => {
     create.mockRejectedValue(invalidKey);
     await expect(validateApiKey("dummy-key")).resolves.toBe(false);
     expect(create).toHaveBeenCalledOnce();
-    expect(create.mock.calls[0]?.[1]).toMatchObject({ timeout: 20_000, maxRetries: 0 });
+    expect(create.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
   });
 
   it("does not call every 400 an invalid key", async () => {
@@ -79,7 +75,7 @@ describe("account API key validation", () => {
     create.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     const result = validateApiKey("dummy-key");
     const outcome = expect(result).rejects.toMatchObject({ status: 504, code: "timeout" });
-    const signal = create.mock.calls[0]?.[1].fetchOptions.signal as AbortSignal;
+    const signal = create.mock.calls[0]?.[1] as AbortSignal;
     expect(signal.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(20_000);
     await outcome;
