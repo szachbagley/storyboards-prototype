@@ -421,6 +421,16 @@ server's `ENCRYPTION_KEY`. It is decrypted only at the call site in
 returned by any endpoint — `GET /auth/me` exposes only `hasGeminiKey` and a
 4-character hint.
 
+Registration and Settings verify a candidate key with one interaction before
+encrypting or saving it. A completed interaction establishes that the key was
+accepted even if the model returned no text. An HTTP 400 is an invalid-key
+response only when its structured ErrorInfo reason is `API_KEY_INVALID`; other
+400s may indicate a malformed validation request. Permission, rate-limit,
+timeout, and upstream failures return safe, distinct guidance. A failed check
+leaves any previously saved encrypted key unchanged. Validation uses a 20s SDK
+timeout with automatic retries disabled, and server logs never include the
+candidate key or raw upstream response body.
+
 Losing `ENCRYPTION_KEY` makes every stored key unrecoverable; users would have
 to re-enter them.
 

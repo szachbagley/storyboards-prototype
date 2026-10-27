@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import {
   ASPECT_RATIO,
+  API_KEY_VALIDATION_DEADLINE_MS,
   DESCRIBE_DEADLINE_MS,
   DESCRIPTION_MODEL,
   DESCRIPTION_THINKING_LEVEL,
@@ -214,15 +215,67 @@ export async function validateApiKey(apiKey: string): Promise<boolean> {
         input: [{ type: "text", text: "Reply with the single word: ok" }],
         generation_config: { thinking_level: DESCRIPTION_THINKING_LEVEL },
       },
-      { timeout: 20_000, maxRetries: 0 },
+      { timeout: API_KEY_VALIDATION_DEADLINE_MS, maxRetries: 0 },
     );
-    return typeof interaction.output_text === "string";
+    if (interaction.status !== "completed") {
+      throw new AppError(502, "upstream_error", "Gemini did not complete key verification. Try again.");
+    }
+    // A completed interaction proves the key was accepted. Its generated text
+    // can be empty for reasons unrelated to authentication.
+    return true;
   } catch (err) {
-    const status = typeof err === "object" && err !== null ? (err as { status?: number }).status : undefined;
-    // 401/403 means the key is bad. Anything else -- a rate limit, an outage --
-    // is not the key's fault, so do not tell the user to replace it.
-    if (status === 401 || status === 403) return false;
-    console.error("[gemini] key validation could not complete", err);
+    if (err instanceof AppError) throw err;
+    const status = validationStatus(err);
+    if (status === 401 || ((status === 400 || status === 403) && hasInvalidKeyReason(err))) return false;
+    // 403 can also mean project restrictions or billing trouble. It does not
+    // prove the user's key is invalid.
+    if (status === 403) {
+      throw new AppError(422, "api_key_access_denied",
+        "Gemini denied access for this key. Check its restrictions and project status in AI Studio.");
+    }
+    if (status === 429) {
+      throw new AppError(503, "upstream_error", "Gemini is rate limiting key checks. Try again shortly.");
+    }
+    if (status === 504 || (err instanceof Error && err.name === "APIConnectionTimeoutError")) {
+      throw new AppError(504, "timeout", "Gemini key verification timed out. Try again.");
+    }
+    // SDK messages can contain the upstream JSON body. Never log that body or
+    // the plaintext key; the status alone is enough for safe diagnostics.
+    console.error(`[gemini] key validation could not complete status=${status ?? "unknown"}`);
+    if (status === 400) {
+      throw new AppError(502, "upstream_error",
+        "Gemini rejected the verification request. Try again later or contact support if this continues.");
+    }
     throw new AppError(502, "upstream_error", "Could not verify the API key right now. Try again.");
   }
+}
+
+function validationStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const candidate = error as { status?: unknown; statusCode?: unknown };
+  const status = candidate.status ?? candidate.statusCode;
+  return typeof status === "number" ? status : undefined;
+}
+
+// The Interactions SDK's ApiError stores the JSON response in `message`;
+// newer wrappers may carry it in `body` or `error`. Match the structured
+// ErrorInfo reason, never an arbitrary 400 or a free-text phrase.
+function hasInvalidKeyReason(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { error?: unknown; body?: unknown; message?: unknown };
+  const sources = [candidate.error, candidate.body, candidate.message];
+  for (const source of sources) {
+    let value: unknown = source;
+    if (typeof source === "string") {
+      try { value = JSON.parse(source) as unknown; } catch { continue; }
+    }
+    if (typeof value !== "object" || value === null) continue;
+    const payload = value as { error?: unknown; details?: unknown };
+    const inner = typeof payload.error === "object" && payload.error !== null
+      ? payload.error as { details?: unknown } : payload;
+    if (Array.isArray(inner.details) && inner.details.some((detail: unknown) =>
+      typeof detail === "object" && detail !== null &&
+      (detail as { reason?: unknown }).reason === "API_KEY_INVALID")) return true;
+  }
+  return false;
 }
