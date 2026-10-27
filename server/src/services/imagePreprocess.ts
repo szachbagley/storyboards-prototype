@@ -47,3 +47,18 @@ export async function preprocessReferenceImage(input: Buffer): Promise<Buffer> {
     });
   }
 }
+
+/** Reuse upload preprocessing, but report a bad stored source as preflight 422. */
+export async function preprocessContinuityImage(input: Buffer): Promise<Buffer> {
+  if (input.length === 0) {
+    throw new AppError(422, "continuity_image_invalid", "The selected source image is empty or unreadable.");
+  }
+  try {
+    return await preprocessReferenceImage(input);
+  } catch (error) {
+    if (error instanceof AppError && error.code === "invalid_image") {
+      throw new AppError(422, "continuity_image_invalid", "The selected source image is empty or unreadable.");
+    }
+    throw error;
+  }
+}

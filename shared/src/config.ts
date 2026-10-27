@@ -35,6 +35,11 @@ export const MAX_TOTAL_CONCEPTS = 10;
 // a still-running generation would be swept as abandoned.
 export const GENERATION_DEADLINE_MS = 90_000;
 
+// One wall-clock budget for reference reads, preprocessing and the continuity
+// copy before admission. Cleanup gets its own short budget after a failed PUT.
+export const REFERENCE_PREFLIGHT_DEADLINE_MS = 30_000;
+export const CANDIDATE_CLEANUP_DEADLINE_MS = 5_000;
+
 // rate_limited is the only error code that auto-retries (TECH_SPEC.md 8.6).
 export const RATE_LIMIT_MAX_RETRIES = 2;
 export const RATE_LIMIT_BACKOFF_MS = [2_000, 8_000] as const;
