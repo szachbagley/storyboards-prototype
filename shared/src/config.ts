@@ -36,7 +36,7 @@ export const MAX_TOTAL_CONCEPTS = 10;
 export const GENERATION_DEADLINE_MS = 90_000;
 
 // One wall-clock budget for reference reads, preprocessing and the continuity
-// copy before admission. Cleanup gets its own short budget after a failed PUT.
+// copy before admission. Known-uncommitted copy cleanup gets its own budget.
 export const REFERENCE_PREFLIGHT_DEADLINE_MS = 30_000;
 export const CANDIDATE_CLEANUP_DEADLINE_MS = 5_000;
 

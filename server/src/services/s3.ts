@@ -2,6 +2,7 @@ import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } fro
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { IMAGE_MIME_TYPE, PRESIGNED_URL_TTL_SECONDS } from "@storyboards/shared";
 import { env } from "../config/env.js";
+import { Readable } from "node:stream";
 
 // Credentials come from the SDK's default provider chain, which reads
 // AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from the environment. env.ts
@@ -75,7 +76,24 @@ export async function getObjectBytes(key: string, signal?: AbortSignal): Promise
   const result = await s3.send(new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: key }),
     { abortSignal: signal });
   if (!result.Body) throw new EmptyS3BodyError();
-  return Buffer.from(await result.Body.transformToByteArray());
+  const body = result.Body;
+  // Header success is not body success. Stop consumption on cancellation and
+  // never interpret a later stream error as authoritative object absence.
+  if (signal?.aborted) {
+    if (body instanceof Readable) body.destroy();
+    throw new Error("S3 response body unavailable");
+  }
+  const onAbort = () => {
+    if (body instanceof Readable) body.destroy(new Error("S3 response body aborted"));
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    return Buffer.from(await body.transformToByteArray());
+  } catch {
+    throw new Error("S3 response body unavailable");
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 export async function deleteObject(key: string, signal?: AbortSignal): Promise<void> {

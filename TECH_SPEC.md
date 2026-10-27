@@ -392,8 +392,10 @@ Authoritative S3 NoSuchKey/404 means missing; access denial, transport errors,
 5xx, and timeouts mean storage unavailable. No fallback to no continuity is
 allowed when a configured source fails preflight.
 
-Only a candidate proven uncommitted may delete its own staged key. A failed
-PUT is cleaned up best-effort; a process crash before insert, an ambiguous
+Only a candidate with known copy ownership and proven uncommitted admission
+may delete its own staged key. An unacknowledged conditional PUT is preserved:
+even a 5xx may precede evaluation of the write-if-absent condition and cannot
+prove ownership of an existing key. A process crash before insert, an ambiguous
 PUT, or failed cleanup may leave a private orphan requiring separately
 approved inventory/reconciliation. An uncertain SQL admission must preserve
 the object until ownership is established. Existing concept uploads still

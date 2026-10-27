@@ -2,6 +2,8 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { registerHooks } from "node:module";
+import { getEventListeners } from "node:events";
+import { Readable } from "node:stream";
 import sharp from "sharp";
 
 if (!globalThis.__package1Outbound) throw new Error("offline network guard must be preloaded");
@@ -18,6 +20,10 @@ let fault = null;
 let deleteFault = null;
 let hangGet = false;
 let hangPut = false;
+let hangDelete = false;
+let bodyMode = "normal";
+let lastBody;
+let expireOnPut;
 globalThis.__package2S3 = {
   calls,
   async send(command, options) {
@@ -25,6 +31,7 @@ globalThis.__package2S3 = {
     if (fault?.kind === command.kind) {
       const current = fault;
       fault = null;
+      if (current.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, current.delayMs);
       if (current.afterWrite) objects.set(key, Buffer.from(command.input.Body));
       throw current.error;
     }
@@ -33,15 +40,33 @@ globalThis.__package2S3 = {
       deleteFault = null;
       throw current;
     }
+    if (command.kind === "delete" && hangDelete) {
+      queueMicrotask(() => expireOnPut());
+      return new Promise(() => {});
+    }
     if (command.kind === "get") {
       if (hangGet) return new Promise(() => {});
       if (!objects.has(key)) throw Object.assign(new Error("missing"), { name: "NoSuchKey" });
+      if (bodyMode === "absent") return {};
+      if (bodyMode === "stalled") {
+        lastBody = new Readable({ read() {} });
+        lastBody.transformToByteArray = async () => {
+          const chunks = [];
+          for await (const chunk of lastBody) chunks.push(chunk);
+          return Buffer.concat(chunks);
+        };
+        return { Body: lastBody };
+      }
+      if (bodyMode === "failed") return { Body: { transformToByteArray: async () => {
+        throw Object.assign(new Error("stream failed after headers"), { $metadata: { httpStatusCode: 404 } });
+      } } };
       return { Body: { transformToByteArray: async () => objects.get(key) } };
     }
     if (command.kind === "put") {
       if (options?.abortSignal?.aborted) throw new Error("aborted");
       if (hangPut) {
         objects.set(key, Buffer.from(command.input.Body));
+        queueMicrotask(() => expireOnPut());
         return new Promise(() => {});
       }
       if (command.input.IfNoneMatch === "*" && objects.has(key)) {
@@ -115,6 +140,7 @@ for (const [error, code, status] of [
   [Object.assign(new Error("404"), { $metadata: { httpStatusCode: 404 } }), "continuity_image_missing", 422],
   [Object.assign(new Error("denied"), { name: "AccessDenied", $metadata: { httpStatusCode: 403 } }), "reference_storage_unavailable", 503],
   [Object.assign(new Error("bucket"), { name: "NoSuchBucket", $metadata: { httpStatusCode: 404 } }), "reference_storage_unavailable", 503],
+  [Object.assign(new Error("bucket"), { code: "NoSuchBucket", statusCode: 404 }), "reference_storage_unavailable", 503],
   [Object.assign(new Error("server"), { $metadata: { httpStatusCode: 503 } }), "reference_storage_unavailable", 503],
   [new Error("transport"), "reference_storage_unavailable", 503],
 ]) {
@@ -136,32 +162,30 @@ await expectCode(() => withBudget((budget) =>
   preflight.stageContinuityCopy(randomUUID(), sourceKey, budget)), "continuity_image_invalid", 422);
 objects.set(sourceKey, original);
 
-// A PUT may write before returning failure. Only this new candidate is removed.
+// A PUT may write before returning failure, or fail before evaluating the
+// condition against an existing copy. Neither outcome proves key ownership.
 const failedId = randomUUID();
 fault = { kind: "put", afterWrite: true, error: new Error("ambiguous PUT failure") };
 await expectCode(() => withBudget((budget) =>
   preflight.stageContinuityCopy(failedId, sourceKey, budget)), "reference_storage_unavailable", 503);
-assert.equal(objects.has(s3.continuityImageKey(failedId)), false);
+assert.equal(objects.has(s3.continuityImageKey(failedId)), true);
 assert.equal(objects.has(first.imageKey), true);
 assert.equal(objects.has(second.imageKey), true);
 assert.equal(objects.has(sourceKey), true);
-const orphanId = randomUUID();
-fault = { kind: "put", afterWrite: true, error: new Error("failed PUT") };
+fault = { kind: "put", error: Object.assign(new Error("service unavailable"), {
+  $metadata: { httpStatusCode: 503 },
+}) };
+const deletesBeforeConflict = calls.filter((call) => call.kind === "delete").length;
+await expectCode(() => withBudget((budget) =>
+  preflight.stageContinuityCopy(secondId, sourceKey, budget)), "reference_storage_unavailable", 503);
+assert.deepEqual(objects.get(second.imageKey), second.imageBytes);
+assert.equal(calls.filter((call) => call.kind === "delete").length, deletesBeforeConflict);
+
+// An acknowledged copy of a known-uncommitted candidate can be removed;
+// cleanup failure leaves just that candidate's documented orphan.
 deleteFault = new Error("failed cleanup");
-let safeCleanupLogs = 0;
-const originalConsoleError = console.error;
-console.error = (message) => {
-  assert.equal(message, "[continuity] candidate cleanup failed; a private orphan may remain");
-  safeCleanupLogs += 1;
-};
-try {
-  await expectCode(() => withBudget((budget) =>
-    preflight.stageContinuityCopy(orphanId, sourceKey, budget)), "reference_storage_unavailable", 503);
-} finally {
-  console.error = originalConsoleError;
-}
-assert.equal(safeCleanupLogs, 1);
-assert.equal(objects.has(s3.continuityImageKey(orphanId)), true);
+await assert.rejects(() => preflight.cleanupKnownUncommittedContinuityCopy(firstId), /failed cleanup/);
+assert.equal(objects.has(first.imageKey), true);
 assert.equal(objects.has(second.imageKey), true);
 await preflight.cleanupKnownUncommittedContinuityCopy(firstId);
 assert.equal(objects.has(first.imageKey), false);
@@ -176,6 +200,12 @@ const ten = await withBudget((budget) =>
   preflight.readConceptReferenceBytes(Array(10).fill(conceptKey), budget));
 assert.equal(ten.length, 10);
 assert.ok(ten.every((bytes) => bytes.toString() === "second"));
+const beforeNulls = calls.length;
+assert.deepEqual(await withBudget((budget) => preflight.readConceptReferenceBytes([null, null], budget)), [null, null]);
+assert.equal(calls.length, beforeNulls);
+await expectCode(() => withBudget((budget) => Promise.all(Array.from({ length: 11 }, () =>
+  preflight.readReferenceBytes(conceptKey, "concept", budget)))), "too_many_concepts", 422);
+assert.equal(calls.length, beforeNulls + 10);
 await withBudget(async (budget) => {
   await preflight.readConceptReferenceBytes(Array(9).fill(conceptKey), budget);
   await preflight.stageContinuityCopy(randomUUID(), sourceKey, budget);
@@ -190,6 +220,7 @@ const originalSetTimeout = globalThis.setTimeout;
 const originalClearTimeout = globalThis.clearTimeout;
 const activeTimers = new Set();
 globalThis.setTimeout = function (handler, delay, ...args) {
+  expireOnPut = handler;
   const timer = originalSetTimeout(handler, delay, ...args);
   activeTimers.add(timer);
   return timer;
@@ -210,16 +241,70 @@ try {
   const timedOutId = randomUUID();
   hangPut = true;
   await expectCode(() => preflight.withReferencePreflight((budget) =>
-    preflight.stageContinuityCopy(timedOutId, sourceKey, budget), 500),
+    preflight.stageContinuityCopy(timedOutId, sourceKey, budget)),
   "reference_storage_unavailable", 503);
   hangPut = false;
   assert.equal(objects.has(s3.continuityImageKey(timedOutId)), true);
+  hangDelete = true;
+  await expectCode(() => preflight.cleanupKnownUncommittedContinuityCopy(secondId),
+    "reference_storage_unavailable", 503);
+  hangDelete = false;
+  assert.equal(objects.has(second.imageKey), true);
   assert.equal(activeTimers.size, 0);
 } finally {
   hangGet = false;
   hangPut = false;
+  hangDelete = false;
   globalThis.setTimeout = originalSetTimeout;
   globalThis.clearTimeout = originalClearTimeout;
+}
+assert.equal(globalThis.__package1Outbound.blocked, 0);
+// A blocked event loop must not let an expired budget start a storage read.
+const beforeExpiredRead = calls.length;
+await expectCode(() => preflight.withReferencePreflight(async (budget) => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
+  return preflight.readReferenceBytes(sourceKey, "continuity", budget);
+}, 10), "reference_storage_unavailable", 503);
+assert.equal(calls.length, beforeExpiredRead);
+
+// The same absolute deadline also applies after a successful earlier read.
+const beforeSharedRead = calls.length;
+await expectCode(() => preflight.withReferencePreflight(async (budget) => {
+  await preflight.readReferenceBytes(sourceKey, "continuity", budget);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
+  return preflight.readReferenceBytes(sourceKey, "continuity", budget);
+}, 10), "reference_storage_unavailable", 503);
+assert.equal(calls.length, beforeSharedRead + 1);
+fault = { kind: "get", delayMs: 40, error: Object.assign(new Error("late 404"), {
+  $metadata: { httpStatusCode: 404 },
+}) };
+await expectCode(() => preflight.withReferencePreflight((budget) =>
+  preflight.readReferenceBytes(sourceKey, "continuity", budget), 10), "reference_storage_unavailable", 503);
+
+let closedBudget;
+await withBudget(async (budget) => { closedBudget = budget; });
+let startedAfterClose = false;
+await expectCode(() => closedBudget.wait(() => {
+  startedAfterClose = true;
+  return Promise.reject(new Error("must not start"));
+}), "reference_storage_unavailable", 503);
+assert.equal(startedAfterClose, false);
+
+bodyMode = "absent";
+await expectCode(() => withBudget((budget) =>
+  preflight.readReferenceBytes(sourceKey, "continuity", budget)), "continuity_image_invalid", 422);
+bodyMode = "failed";
+await expectCode(() => withBudget((budget) =>
+  preflight.readReferenceBytes(sourceKey, "continuity", budget)), "reference_storage_unavailable", 503);
+bodyMode = "stalled";
+await expectCode(() => preflight.withReferencePreflight((budget) =>
+  preflight.readReferenceBytes(sourceKey, "continuity", budget), 20), "reference_storage_unavailable", 503);
+assert.equal(lastBody.destroyed, true);
+bodyMode = "normal";
+await new Promise((resolve) => setImmediate(resolve));
+for (const signal of new Set(calls.map((call) => call.signal).filter(Boolean))) {
+  assert.equal(signal.aborted, true);
+  assert.equal(getEventListeners(signal, "abort").length, 0);
 }
 assert.equal(globalThis.__package1Outbound.blocked, 0);
 console.log(`package2 storage: concept overwrite, distinct copies/hashes/JPEG, missing/unavailable/invalid, candidate cleanup, ten-fanout, deadline/timers passed; real outbound=0; S3 stub calls=${calls.length}`);

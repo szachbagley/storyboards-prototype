@@ -37,7 +37,7 @@ function classifyReadFailure(error: unknown, kind: ReferenceKind): AppError {
     };
     const status = s3Error.$metadata?.httpStatusCode ?? s3Error.statusCode;
     if (status === 403 || (typeof status === "number" && status >= 500) ||
-        s3Error.name === "NoSuchBucket") return unavailable();
+        s3Error.name === "NoSuchBucket" || s3Error.code === "NoSuchBucket") return unavailable();
     if (s3Error.name === "NoSuchKey" || s3Error.code === "NoSuchKey" ||
         status === 404) {
       return missing(kind);
@@ -49,7 +49,7 @@ function classifyReadFailure(error: unknown, kind: ReferenceKind): AppError {
 export interface PreflightBudget {
   readonly signal: AbortSignal;
   reserveReference(): void;
-  wait<T>(operation: Promise<T>): Promise<T>;
+  wait<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 /** One deadline covers every reference read, transformation and copy PUT. */
@@ -58,35 +58,50 @@ export async function withReferencePreflight<T>(
   deadlineMs = REFERENCE_PREFLIGHT_DEADLINE_MS,
 ): Promise<T> {
   const controller = new AbortController();
+  const expiresAt = performance.now() + deadlineMs;
+  let closed = false;
+  const checkDeadline = () => {
+    if (closed || performance.now() >= expiresAt) controller.abort();
+    if (controller.signal.aborted) throw unavailable();
+  };
   const timer = setTimeout(() => controller.abort(), deadlineMs);
+  let onAbort: () => void;
+  const expired = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(unavailable());
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+  });
+  // checkDeadline can abort before the first race is attached.
+  void expired.catch(() => {});
   let referenceReads = 0;
   const budget: PreflightBudget = {
     signal: controller.signal,
     reserveReference() {
+      checkDeadline();
       if (++referenceReads > MAX_TOTAL_CONCEPTS) {
         throw new AppError(422, "too_many_concepts", "Too many reference images for one attempt.");
       }
     },
-    async wait<T>(operation: Promise<T>): Promise<T> {
-      if (controller.signal.aborted) throw unavailable();
-      let onAbort: (() => void) | undefined;
-      const expired = new Promise<never>((_resolve, reject) => {
-        onAbort = () => reject(unavailable());
-        controller.signal.addEventListener("abort", onAbort, { once: true });
-      });
+    async wait<T>(operation: () => Promise<T>): Promise<T> {
+      checkDeadline();
       try {
-        return await Promise.race([operation, expired]);
-      } finally {
-        if (onAbort) controller.signal.removeEventListener("abort", onAbort);
+        const result = await Promise.race([operation(), expired]);
+        checkDeadline();
+        return result;
+      } catch (error) {
+        checkDeadline();
+        throw error;
       }
     },
   };
   try {
-    return await budget.wait(work(budget));
+    return await budget.wait(() => work(budget));
   } catch (error) {
     controller.abort();
     throw error;
   } finally {
+    closed = true;
+    controller.abort();
+    controller.signal.removeEventListener("abort", onAbort!);
     clearTimeout(timer);
   }
 }
@@ -96,7 +111,7 @@ export async function readReferenceBytes(
 ): Promise<Buffer> {
   budget.reserveReference();
   try {
-    const bytes = await budget.wait(getObjectBytes(key, budget.signal));
+    const bytes = await budget.wait(() => getObjectBytes(key, budget.signal));
     if (bytes.length === 0) throw invalid(kind);
     return bytes;
   } catch (error) {
@@ -126,15 +141,6 @@ function sha256(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function isConditionalWriteConflict(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const s3Error = error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
-  return s3Error.name === "PreconditionFailed" ||
-    s3Error.name === "ConditionalRequestConflict" ||
-    s3Error.$metadata?.httpStatusCode === 412 ||
-    s3Error.$metadata?.httpStatusCode === 409;
-}
-
 export interface StagedContinuityCopy {
   imageKey: string;
   imageMime: typeof IMAGE_MIME_TYPE;
@@ -149,22 +155,14 @@ export async function stageContinuityCopy(
 ): Promise<StagedContinuityCopy> {
   requireCandidateId(candidateId);
   const original = await readReferenceBytes(sourceImageKey, "continuity", budget);
-  const transformed = await budget.wait(preprocessContinuityImage(original));
+  const transformed = await budget.wait(() => preprocessContinuityImage(original));
   const imageKey = continuityImageKey(candidateId);
   try {
-    await budget.wait(putContinuityObject(candidateId, transformed, budget.signal));
+    await budget.wait(() => putContinuityObject(candidateId, transformed, budget.signal));
   } catch (error) {
-    // A conditional conflict may refer to an existing copy; never delete it.
-    // Other failed PUTs can have reached S3 but cannot own a committed row yet.
-    // A deadline can hide a late conditional conflict. Keep the key for later
-    // reconciliation rather than risk deleting an already-owned object.
-    if (!budget.signal.aborted && !isConditionalWriteConflict(error)) {
-      try {
-        await cleanupKnownUncommittedContinuityCopy(candidateId);
-      } catch {
-        console.error("[continuity] candidate cleanup failed; a private orphan may remain");
-      }
-    }
+    // Even a 5xx/transport failure can precede evaluation of If-None-Match.
+    // A failed PUT proves neither creation nor ownership of an existing key.
+    // Preserve it for reconciliation, including when an ID was accidentally reused.
     throw error instanceof AppError ? error : unavailable();
   }
   return {
@@ -174,11 +172,13 @@ export async function stageContinuityCopy(
   };
 }
 
-/** Only call after SQL establishes that this candidate was never committed. */
+/** Only for a fresh server-generated candidate whose copy ownership is known
+ * and whose admission is known uncommitted. Never pass client/snapshot IDs,
+ * an ambiguous PUT, or an uncertain SQL outcome. Package 4 owns that check. */
 export async function cleanupKnownUncommittedContinuityCopy(candidateId: string): Promise<void> {
   requireCandidateId(candidateId);
   await withReferencePreflight(
-    (budget) => budget.wait(deleteObject(continuityImageKey(candidateId), budget.signal)),
+    (budget) => budget.wait(() => deleteObject(continuityImageKey(candidateId), budget.signal)),
     CANDIDATE_CLEANUP_DEADLINE_MS,
   );
 }
