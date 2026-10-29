@@ -15,7 +15,7 @@ import {
 import { AppError } from "../lib/AppError.js";
 import type { InputPart } from "./promptCompiler.js";
 import { classifyGeminiError } from "./geminiErrors.js";
-import { requestKeyValidation } from "./keyValidationTransport.js";
+import { requestKeyValidation, type KeyValidationStage } from "./keyValidationTransport.js";
 
 // The only module in the project that imports the Gemini SDK.
 //
@@ -212,15 +212,21 @@ export async function validateApiKey(apiKey: string): Promise<boolean> {
   // Bound response parsing as well as HTTP setup, and prevent a late transport
   // success from being persisted after the caller has already timed out.
   const controller = new AbortController();
+  let stage: KeyValidationStage = "starting";
+  let stageReachedAtMs = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
+      console.warn(`[gemini] key validation deadline stage=${stage} stage_reached_at_ms=${stageReachedAtMs}`);
       reject(validationTimeout());
       controller.abort();
     }, API_KEY_VALIDATION_DEADLINE_MS);
   });
   try {
-    const interaction = await Promise.race([requestKeyValidation(apiKey, controller.signal), deadline]);
+    const interaction = await Promise.race([requestKeyValidation(apiKey, controller.signal, (next, elapsedMs) => {
+      stage = next;
+      stageReachedAtMs = elapsedMs;
+    }), deadline]);
     if (interaction.status !== "completed") {
       throw new AppError(502, "upstream_error", "Gemini did not complete key verification. Try again.");
     }
@@ -248,7 +254,7 @@ export async function validateApiKey(apiKey: string): Promise<boolean> {
     }
     // SDK messages can contain the upstream JSON body. Never log that body or
     // the plaintext key; the status alone is enough for safe diagnostics.
-    console.error(`[gemini] key validation could not complete status=${status ?? "unknown"}`);
+    console.error(`[gemini] key validation could not complete status=${status ?? "unknown"} stage=${stage}`);
     if (status === 400) {
       throw new AppError(502, "upstream_error",
         "Gemini rejected the verification request. Try again later or contact support if this continues.");

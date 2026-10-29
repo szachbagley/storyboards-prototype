@@ -432,6 +432,12 @@ application deadline, signals abort to its validation transport on expiry, and
 disables automatic retries. The timer is cleared when validation settles.
 Timeouts before headers or while reading the response body return HTTP 504. Server logs never include the
 candidate key or raw upstream response body.
+On a deadline, a safe server log records the last transport stage and when it
+was reached: socket assignment, DNS, TCP, TLS, request finish, or response
+headers. A request-finish event means Node handed the bytes to the operating
+system; it does not prove Gemini received the request. These stage markers
+distinguish a connection or TLS stall from waiting for an upstream response
+without logging key material, response bodies, or network addresses.
 
 Account key validation uses a dedicated direct POST to the same
 [`v1beta/interactions` endpoint](https://ai.google.dev/api/interactions-api), with
