@@ -48,6 +48,12 @@ export const POLL_INTERVAL_MS = 2_000;
 // thinking_level "low" is 1.5-8.5s, so 30s is headroom rather than a hang.
 export const DESCRIBE_DEADLINE_MS = 30_000;
 
+// Registration and Settings verify the caller's key with one short, non-retried
+// interaction before any credential is persisted.
+export const API_KEY_VALIDATION_DEADLINE_MS = 20_000;
+export const API_KEY_VALIDATION_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
+export const API_KEY_VALIDATION_MAX_RESPONSE_BYTES = 1_048_576;
+
 // Longer than GENERATION_DEADLINE_MS on purpose. If the client gave up at the
 // same moment the server did, the user would see a generic client-side timeout
 // instead of the server's classified error from the TECH_SPEC.md 8.6 taxonomy.

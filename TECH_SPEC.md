@@ -421,6 +421,46 @@ server's `ENCRYPTION_KEY`. It is decrypted only at the call site in
 returned by any endpoint — `GET /auth/me` exposes only `hasGeminiKey` and a
 4-character hint.
 
+Registration and Settings verify a candidate key with one interaction before
+encrypting or saving it. A completed interaction establishes that the key was
+accepted even if the model returned no text. An HTTP 400 is an invalid-key
+response only when its structured ErrorInfo reason is `API_KEY_INVALID`; other
+400s may indicate a malformed validation request. Permission, rate-limit,
+timeout, and upstream failures return safe, distinct guidance. A failed check
+leaves any previously saved encrypted key unchanged. Validation enforces a 20s
+application deadline, signals abort to its validation transport on expiry, and
+disables automatic retries. The timer is cleared when validation settles.
+Timeouts before headers or while reading the response body return HTTP 504. Server logs never include the
+candidate key or raw upstream response body.
+
+Account key validation uses a dedicated direct POST to the same
+[`v1beta/interactions` endpoint](https://ai.google.dev/api/interactions-api), with
+the same model, input and thinking level as before. It rejects redirects and
+caps response bodies at 1 MiB. This narrow exception to SDK usage uses Node
+HTTPS to own the request and response streams explicitly, destroys both on
+abort/overflow, and removes its abort listener when settled. The SDK 2.17.1
+request-cloning path lost abort propagation after garbage collection in
+loopback probes on Node 24.19.0 and 22.23.2. Direct fetch also failed body
+cancellation on Node 22.23.2. Native HTTPS avoids those controller chains;
+the full transport matrix passes on both runtimes with forced collection.
+Generation and description still use the SDK; no SDK or runtime upgrade is
+included. The earlier failing SDK fixture is preserved in commit `98abf303`.
+
+After building, `server/scripts/verify-key17-transport.mjs` exercises validation
+over loopback HTTP, including the full 20s deadline, direct transport settlement,
+abort dispatch, body cancellation, oversized responses and redirect rejection.
+`server/scripts/verify-key17-app.mjs` verifies encrypted persistence using its
+disposable PostgreSQL fixture (`KEY17_TEST_DATABASE_URL`). Run both with
+`node --import ./server/scripts/offline-network-guard.mjs` before the script path;
+add `--expose-gc` for the transport fixture to force collection while requests
+are pending. They refuse to run without the guard and use only dummy keys.
+Cancellation checks observe unfinished HTTP/1.1 responses closing, not every
+pooled socket: idle keep-alive connections may remain/reopen. Raw transport
+promises must reject without relying on the application's deadline race.
+
+These offline checks do not establish the cause of the reported live Settings
+502, whose sanitized response is still needed, or verify live key/model access.
+
 Losing `ENCRYPTION_KEY` makes every stored key unrecoverable; users would have
 to re-enter them.
 
