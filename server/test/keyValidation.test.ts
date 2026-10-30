@@ -18,6 +18,7 @@ const invalidKey = sdkError(400, { error: {
 beforeEach(() => {
   create.mockReset();
   vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
@@ -55,7 +56,7 @@ describe("account API key validation", () => {
     expect(error).toMatchObject({ status: 502, code: "upstream_error" });
     expect(String(error)).not.toContain(key);
     expect(vi.mocked(console.error).mock.calls).toEqual([
-      ["[gemini] key validation could not complete status=503"],
+      ["[gemini] key validation could not complete status=503 stage=starting"],
     ]);
   });
 
@@ -80,6 +81,9 @@ describe("account API key validation", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     await outcome;
     expect(signal.aborted).toBe(true);
+    expect(vi.mocked(console.warn).mock.calls).toEqual([
+      ["[gemini] key validation deadline stage=starting stage_reached_at_ms=0"],
+    ]);
     expect(vi.getTimerCount()).toBe(0);
     finish({ status: "completed" });
     await expect(result).rejects.toMatchObject({ status: 504, code: "timeout" });

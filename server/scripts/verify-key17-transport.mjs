@@ -11,6 +11,7 @@ import { API_KEY_VALIDATION_DEADLINE_MS, API_KEY_VALIDATION_URL,
 if (!globalThis.__package1Outbound) throw new Error("offline guard was not preloaded");
 const originalRequest = https.request;
 const originalError = console.error;
+const originalWarn = console.warn;
 const logs = [];
 const key = "fixture-secret-sentinel";
 const scenarios = [];
@@ -59,11 +60,13 @@ try {
     const call = { signal: init.signal, requestClosed: false };
     calls.push(call);
     const request = http.request(`${origin}/v1beta/interactions`, init, callback);
+    request.on("socket", (socket) => { call.socket = socket; });
     request.once("close", () => { call.requestClosed = true; });
     return request;
   };
   syncBuiltinESMExports();
   console.error = (...args) => logs.push(args.map(String).join(" "));
+  console.warn = (...args) => logs.push(args.map(String).join(" "));
   const { validateApiKey } = await import("../dist/services/gemini.js");
   const { requestKeyValidation } = await import("../dist/services/keyValidationTransport.js");
   const alreadyAborted = new AbortController();
@@ -129,12 +132,21 @@ try {
   const results = await appResults;
   await Promise.all(directResults);
   assert.deepEqual(results, Array(3).fill({ status: 504, code: "timeout" }));
+  const deadlineLogs = logs.filter((line) => line.includes("key validation deadline"));
+  assert.equal(deadlineLogs.length, 3);
+  assert.equal(deadlineLogs.filter((line) => line.includes("stage=request_finished")).length, 1);
+  assert.equal(deadlineLogs.filter((line) => line.includes("stage=headers_received")).length, 2);
   phase = "socket cancellation";
   await Promise.all(closed);
   assert.equal(cancelled, 7); // Six active stalls plus the oversized body.
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(calls.slice(-6).every((call) => call.signal.aborted && call.requestClosed));
   assert.ok(calls.every((call) => getEventListeners(call.signal, "abort").length === 0), "abort listener leak");
+  for (const call of calls) {
+    for (const event of ["lookup", "connect", "secureConnect"]) {
+      assert.equal(getEventListeners(call.socket, event).length, 0, `${event} listener leak`);
+    }
+  }
   const elapsedMs = performance.now() - began;
   assert.ok(elapsedMs >= API_KEY_VALIDATION_DEADLINE_MS - 1000 &&
     elapsedMs < API_KEY_VALIDATION_DEADLINE_MS + 5000, "validation deadline exceeded");
@@ -149,6 +161,7 @@ try {
   https.request = originalRequest;
   syncBuiltinESMExports();
   console.error = originalError;
+  console.warn = originalWarn;
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
 }
