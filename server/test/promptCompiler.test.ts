@@ -8,6 +8,7 @@ import {
 import { AppError } from "../src/lib/AppError.js";
 import {
   CONTINUITY_REFERENCE_TEMPLATE,
+  CONTINUITY_RULES,
   FORMAT_PREAMBLE,
   OUTPUT_CONSTRAINTS,
   compileFramePrompt,
@@ -64,6 +65,7 @@ describe("constant fidelity against the storyboard-prompt-compiler skill", () =>
     expect(fencedConstant("FORMAT_PREAMBLE")).not.toBe("");
     expect(fencedConstant("OUTPUT_CONSTRAINTS")).not.toBe("");
     expect(fencedConstant("CONTINUITY_REFERENCE_TEMPLATE")).not.toBe("");
+    expect(fencedConstant("CONTINUITY_RULES")).not.toBe("");
   });
 
   it("FORMAT_PREAMBLE is byte-identical to the skill", () => {
@@ -76,6 +78,11 @@ describe("constant fidelity against the storyboard-prompt-compiler skill", () =>
 
   it("CONTINUITY_REFERENCE_TEMPLATE is byte-identical to the skill", () => {
     expect(CONTINUITY_REFERENCE_TEMPLATE).toBe(fencedConstant("CONTINUITY_REFERENCE_TEMPLATE"));
+  });
+
+  it("CONTINUITY_RULES is byte-identical to the skill", () => {
+    expect(CONTINUITY_RULES).toBe(fencedConstant("CONTINUITY_RULES"));
+    expect(CONTINUITY_RULES.split("\n")).toHaveLength(4);
   });
 
   it("carries no visual style, which is a deliberate v1 scope decision", () => {
@@ -271,6 +278,39 @@ describe("the frame description is inserted verbatim", () => {
 describe("optional continuity reference order", () => {
   const continuity = { imageBase64: "SENTINEL-CONTINUITY", imageMimeType: "image/jpeg" };
 
+  it("matches the complete approved continuity prompt and parts byte for byte", () => {
+    const authored = "  A wears a red coat.\n\nKeep the room unchanged.\u0020\u0020";
+    const expected =
+      "Generate a single storyboard frame for a film production.\n\n" +
+      "The reference images below establish how specific subjects must look.\n" +
+      "Reproduce each referenced subject faithfully — the same face, the same\n" +
+      "costume, the same materials — while placing them in the scene described.\n\n" +
+      "Reference image 1 — A (character): A description\n" +
+      "B (prop): B description\n\n" +
+      "Reference image 2 — Continuity source frame: use this image as the visual starting point for this scene.\n\n" +
+      "Preserve visual details from the continuity source frame unless the Scene explicitly changes them.\n" +
+      "Follow explicit Scene instructions over conflicting details in the continuity source or concept references.\n" +
+      "Use the concept references to establish subject identity; use the continuity source for otherwise unspecified visual details.\n" +
+      "Do not copy panel divisions, borders, captions, or text overlays from the continuity source.\n\n" +
+      "Scene:   A wears a red coat.\n\nKeep the room unchanged.\u0020\u0020\n\n" +
+      "Render exactly one image. Compose it as a single continuous frame with no\n" +
+      "panel divisions, borders, captions, or text overlays.";
+    const { prompt, parts } = compileFramePrompt({
+      frameDescription: authored,
+      concepts: [
+        concept("A", "character", { description: "A description" }),
+        concept("B", "prop", { image: false, description: "B description" }),
+      ],
+      continuity: { imageBase64: "SENTINEL-C", imageMimeType: "image/jpeg" },
+    });
+    expect(prompt).toBe(expected);
+    expect(parts).toEqual([
+      { type: "text", text: expected },
+      { type: "image", mime_type: "image/jpeg", data: "SENTINEL-A" },
+      { type: "image", mime_type: "image/jpeg", data: "SENTINEL-C" },
+    ]);
+  });
+
   it.each([
     ["no concepts", []],
     ["imaged concepts", [concept("Alpha", "character"), concept("Bravo", "prop")]],
@@ -326,6 +366,20 @@ describe("optional continuity reference order", () => {
     expect(prompt).not.toContain("id-Alpha");
     expect(prompt).not.toContain(continuity.imageBase64);
     expect(parts[0]).toEqual({ type: "text", text: prompt });
+  });
+
+  it("puts the four precedence rules immediately before the authored Scene", () => {
+    const { prompt } = compileFramePrompt({ frameDescription: SCENE, concepts: [], continuity });
+    expect(prompt).toContain(`\n\n${CONTINUITY_RULES}\n\nScene: ${SCENE}\n\n${OUTPUT_CONSTRAINTS}`);
+    expect(prompt).toContain("explicit Scene instructions over conflicting details in the continuity source or concept references");
+  });
+
+  it("keeps the supplied continuity MIME type on the final image part", () => {
+    const { parts } = compileFramePrompt({
+      frameDescription: SCENE, concepts: [concept("Alpha", "character")],
+      continuity: { imageBase64: "SENTINEL-PNG", imageMimeType: "image/png" },
+    });
+    expect(parts[2]).toEqual({ type: "image", mime_type: "image/png", data: "SENTINEL-PNG" });
   });
 });
 

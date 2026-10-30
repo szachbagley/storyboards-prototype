@@ -133,6 +133,10 @@ Followed by image parts in the same order the "Reference image N" lines appear.
 When a continuity source is supplied, its image and numbered label follow every
 concept reference. Imageless concepts remain in the concept text block and do
 not consume an image number. With no concepts, continuity is image 1.
+For continuity, add the continuity rules after its numbered label and immediately
+before `Scene:`. Sections are separated by two LF characters; concept lines
+remain one LF-joined block. No source ID, position, description, or source prompt
+is inserted into the compiled text.
 
 ### Constants
 
@@ -154,6 +158,14 @@ panel divisions, borders, captions, or text overlays.
 ```
 CONTINUITY_REFERENCE_TEMPLATE:
 Reference image {N} — Continuity source frame: use this image as the visual starting point for this scene.
+```
+
+```
+CONTINUITY_RULES:
+Preserve visual details from the continuity source frame unless the Scene explicitly changes them.
+Follow explicit Scene instructions over conflicting details in the continuity source or concept references.
+Use the concept references to establish subject identity; use the continuity source for otherwise unspecified visual details.
+Do not copy panel divisions, borders, captions, or text overlays from the continuity source.
 ```
 
 The preamble carries no visual style. Style is the user's responsibility, expressed inline in the frame description — that is a deliberate v1 scope decision, not an omission to fix.
@@ -182,6 +194,12 @@ Inputs to `{ prompt, parts }`. No database, no S3, no network, no clock, no rand
 **6. Persist the compiled prompt before the API call.**
 Write `compiled_prompt` and `input_snapshot` to the `generations` row first. A failed call whose prompt was never recorded is undiagnosable.
 
+**7. Explicit Scene changes win over conflicting reference details.**
+Concept references establish subject identity and the continuity source supplies
+otherwise unspecified visual details. When the authored Scene explicitly changes
+an appearance detail, follow it even if a concept or source image shows something
+else. Do not rewrite concept descriptions or the authored Scene to force this.
+
 ---
 
 ## Validation
@@ -207,7 +225,7 @@ When a character drifts across frames, check in this order:
 3. **Does the description contain scene content?** Grep stored descriptions for `standing`, `sitting`, `walking`, `background`, `lighting`, `shot`, `angle`, `sunset`, `dramatic`. Any hit is a rule violation.
 4. **Are there more than four characters?** Validation should prevent this, but confirm.
 5. **Is the reference image itself poor?** A cluttered background, extreme angle, or heavy shadow gives the model an ambiguous target. The fix is a better reference, or a canonicalization pass that generates one clean neutral-background plate to use as the anchor.
-6. **Is the frame description fighting the reference?** "Wearing a red coat" against a reference in blue forces the model to choose. Frame descriptions should direct action and staging, not restate or contradict appearance.
+6. **Is the frame description fighting a reference?** An explicit change such as "wearing a red coat" against a blue-coat reference is intentional and takes precedence in the continuity prompt. Avoid accidental contradictions: the model may still struggle visually, especially if the change is vague. Check the compiled rule and the exact authored Scene before changing reference images.
 
 ---
 

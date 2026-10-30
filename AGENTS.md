@@ -103,7 +103,7 @@ Violating any of these is a bug even if the code runs.
 
 **5. Enumeration order must match image part order.** If the compiled text says "Reference image 2 — Castle", the second image part must be Castle's. Imaged concepts remain in attachment order; an explicit continuity image, when supplied, is last. Imageless concepts do not consume an image number. Desync causes the model to attach the wrong description to the wrong subject, which presents as random inconsistency and is miserable to diagnose.
 
-**6. The frame description is inserted verbatim.** Never paraphrase, reorder, summarize, or "improve" the user's authored scene text in the compiler.
+**6. The frame description is inserted verbatim.** Never paraphrase, reorder, summarize, or "improve" the user's authored scene text in the compiler. With explicit continuity, the exact compiler rules give explicit Scene changes precedence over conflicting source or concept reference details; they do not rewrite any input text.
 
 **7. Snapshot before generating.** `compiled_prompt` and `input_snapshot` are written to the `generations` row **before** the API call, not after. Concepts are mutable; without the snapshot, editing one destroys the provenance of every frame made from it.
 

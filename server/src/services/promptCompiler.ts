@@ -28,6 +28,8 @@ export const OUTPUT_CONSTRAINTS = "Render exactly one image. Compose it as a sin
 
 export const CONTINUITY_REFERENCE_TEMPLATE = "Reference image {N} — Continuity source frame: use this image as the visual starting point for this scene.";
 
+export const CONTINUITY_RULES = "Preserve visual details from the continuity source frame unless the Scene explicitly changes them.\nFollow explicit Scene instructions over conflicting details in the continuity source or concept references.\nUse the concept references to establish subject identity; use the continuity source for otherwise unspecified visual details.\nDo not copy panel divisions, borders, captions, or text overlays from the continuity source.";
+
 export interface CompilerConcept {
   id: string;
   name: string;
@@ -140,7 +142,7 @@ export function compileFramePrompt(input: CompilerInput): CompiledPrompt {
   // A frame with no attached concepts is legal -- it is simply a text-to-image
   // prompt -- and must not leave a ragged double blank line.
   if (lines.length > 0) sections.push(lines.join("\n"));
-  if (continuityLine !== null) sections.push(continuityLine);
+  if (continuityLine !== null) sections.push(continuityLine, CONTINUITY_RULES);
   // Verbatim and untrimmed. This is the user's authored intent (invariant 6).
   sections.push(`Scene: ${input.frameDescription}`);
   sections.push(OUTPUT_CONSTRAINTS);
