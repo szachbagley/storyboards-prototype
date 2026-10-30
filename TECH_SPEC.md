@@ -381,6 +381,35 @@ This is not cosmetic. Reference images gain nothing from being 12 megapixels, an
 
 **Reads** are served via presigned GET URLs with a 1-hour expiry, generated when the API returns a record. The bucket stays private.
 
+### 9.1 Continuity storage primitives (Package 2; not yet enabled)
+
+A future admitted continuity attempt may stage one private JPEG at
+`generations/{candidateGenerationId}/continuity.jpg`. The candidate generation
+UUID is distinct for every preflight, even when requests share an idempotency
+UUID. The staged copy uses the existing 1024px, quality-85 JPEG preprocessing.
+Preflight records SHA-256 of the downloaded original bytes and the transformed
+bytes actually prepared as a reference; a hash is provenance, not a retained
+image or a replay endpoint. Reference reads and the candidate PUT share a
+30-second deadline, SDK abort signal, and a maximum ten-attachment fanout.
+Authoritative S3 NoSuchKey/404 means missing; access denial, transport errors,
+5xx, and timeouts mean storage unavailable. No fallback to no continuity is
+allowed when a configured source fails preflight.
+
+Only a candidate with known copy ownership and proven uncommitted admission
+may delete its own staged key. An unacknowledged conditional PUT is preserved:
+even a 5xx may precede evaluation of the write-if-absent condition and cannot
+prove ownership of an existing key. A process crash before insert, an ambiguous
+PUT, or failed cleanup may leave a private orphan requiring separately
+approved inventory/reconciliation. An uncertain SQL admission must preserve
+the object until ownership is established. Existing concept uploads still
+overwrite `concepts/{conceptId}/reference.jpg` in place. A metadata capture
+followed by that overwrite can pair an earlier description with later image
+bytes, so concept images remain non-replayable despite recorded byte hashes.
+This section does not approve copy retention, change bucket lifecycle policy,
+add an asset service, or enable the source configuration or generation path.
+Bucket lifecycle compatibility and the retention policy require review before
+the integrated continuity feature is released.
+
 ---
 
 ## 10. Authentication
