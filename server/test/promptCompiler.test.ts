@@ -1,9 +1,13 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { MAX_CHARACTER_CONCEPTS, MAX_TOTAL_CONCEPTS, type ConceptType } from "@storyboards/shared";
+import {
+  CONTINUITY_REFERENCE_SLOTS, MAX_CHARACTER_CONCEPTS, MAX_TOTAL_CONCEPTS,
+  effectiveConceptLimit, type ConceptType,
+} from "@storyboards/shared";
 import { AppError } from "../src/lib/AppError.js";
 import {
+  CONTINUITY_REFERENCE_TEMPLATE,
   FORMAT_PREAMBLE,
   OUTPUT_CONSTRAINTS,
   compileFramePrompt,
@@ -59,6 +63,7 @@ describe("constant fidelity against the storyboard-prompt-compiler skill", () =>
     expect(constantsSection().length).toBeGreaterThan(200);
     expect(fencedConstant("FORMAT_PREAMBLE")).not.toBe("");
     expect(fencedConstant("OUTPUT_CONSTRAINTS")).not.toBe("");
+    expect(fencedConstant("CONTINUITY_REFERENCE_TEMPLATE")).not.toBe("");
   });
 
   it("FORMAT_PREAMBLE is byte-identical to the skill", () => {
@@ -67,6 +72,10 @@ describe("constant fidelity against the storyboard-prompt-compiler skill", () =>
 
   it("OUTPUT_CONSTRAINTS is byte-identical to the skill", () => {
     expect(OUTPUT_CONSTRAINTS).toBe(fencedConstant("OUTPUT_CONSTRAINTS"));
+  });
+
+  it("CONTINUITY_REFERENCE_TEMPLATE is byte-identical to the skill", () => {
+    expect(CONTINUITY_REFERENCE_TEMPLATE).toBe(fencedConstant("CONTINUITY_REFERENCE_TEMPLATE"));
   });
 
   it("carries no visual style, which is a deliberate v1 scope decision", () => {
@@ -259,6 +268,67 @@ describe("the frame description is inserted verbatim", () => {
   });
 });
 
+describe("optional continuity reference order", () => {
+  const continuity = { imageBase64: "SENTINEL-CONTINUITY", imageMimeType: "image/jpeg" };
+
+  it.each([
+    ["no concepts", []],
+    ["imaged concepts", [concept("Alpha", "character"), concept("Bravo", "prop")]],
+    ["interleaved imageless concepts", [
+      concept("Alpha", "character"), concept("Bravo", "prop", { image: false }),
+      concept("Charlie", "setting"),
+    ]],
+    ["all imageless concepts", [
+      concept("Alpha", "character", { image: false }),
+      concept("Bravo", "prop", { image: false }),
+    ]],
+  ] satisfies Array<[string, CompilerConcept[]]>)("numbers concept images then continuity: %s", (_name, concepts) => {
+    const { prompt, parts } = compileFramePrompt({ frameDescription: SCENE, concepts, continuity });
+    const imageLabels = [...prompt.matchAll(/^Reference image (\d+) — (.+)$/gm)];
+    const expectedImages = [
+      ...concepts.filter((c) => c.imageBase64 !== null).map((c) => c.imageBase64),
+      continuity.imageBase64,
+    ];
+    expect(imageLabels.map((match) => Number(match[1]))).toEqual(
+      expectedImages.map((_, index) => index + 1),
+    );
+    expect(imageLabels.at(-1)?.[0]).toBe(
+      CONTINUITY_REFERENCE_TEMPLATE.replace("{N}", String(expectedImages.length)),
+    );
+    expect(parts.map((part) => part.type === "image" ? part.data : null))
+      .toEqual([null, ...expectedImages]);
+    expect(parts[0]).toEqual({ type: "text", text: prompt });
+    expect(parts).toHaveLength(expectedImages.length + 1);
+  });
+
+  it("keeps omitted and null continuity identical to the original no-source output", () => {
+    const concepts = [concept("Alpha", "character"), concept("Bravo", "prop", { image: false })];
+    const omitted = compileFramePrompt({ frameDescription: SCENE, concepts });
+    const explicitNull = compileFramePrompt({ frameDescription: SCENE, concepts, continuity: null });
+    expect(explicitNull).toEqual(omitted);
+    expect(omitted.prompt).toBe(
+      `${FORMAT_PREAMBLE}\n\nReference image 1 — Alpha (character): Alpha description\n` +
+      `Bravo (prop): Bravo description\n\nScene: ${SCENE}\n\n${OUTPUT_CONSTRAINTS}`,
+    );
+    expect(omitted.parts).toEqual([
+      { type: "text", text: omitted.prompt },
+      { type: "image", mime_type: "image/jpeg", data: "SENTINEL-Alpha" },
+    ]);
+  });
+
+  it("keeps authored Unicode, whitespace and newlines verbatim with continuity", () => {
+    const authored = "  A wears a red coat.\n\nKeep the room unchanged.  ☀️\t";
+    const { prompt, parts } = compileFramePrompt({
+      frameDescription: authored,
+      concepts: [concept("Alpha", "character")], continuity,
+    });
+    expect(prompt).toContain(`Scene: ${authored}\n\n${OUTPUT_CONSTRAINTS}`);
+    expect(prompt).not.toContain("id-Alpha");
+    expect(prompt).not.toContain(continuity.imageBase64);
+    expect(parts[0]).toEqual({ type: "text", text: prompt });
+  });
+});
+
 describe("the skill's worked example", () => {
   it("is reproduced exactly, modulo the skill's markdown line wrapping", () => {
     const worked = skill.split("## Worked example")[1] ?? "";
@@ -360,6 +430,58 @@ describe("validation caps", () => {
         concepts: [...characters(MAX_CHARACTER_CONCEPTS), ...props(MAX_TOTAL_CONCEPTS - MAX_CHARACTER_CONCEPTS)],
       }),
     ).not.toThrow();
+  });
+
+  it("reserves exactly one concept slot for continuity", () => {
+    expect(CONTINUITY_REFERENCE_SLOTS).toBe(1);
+    expect(effectiveConceptLimit(false)).toBe(MAX_TOTAL_CONCEPTS);
+    expect(effectiveConceptLimit(true)).toBe(MAX_TOTAL_CONCEPTS - CONTINUITY_REFERENCE_SLOTS);
+  });
+
+  it("accepts ten attachments without continuity and nine with it", () => {
+    const continuity = { imageBase64: "SOURCE", imageMimeType: "image/jpeg" };
+    expect(() => compileFramePrompt({ frameDescription: SCENE, concepts: props(10) })).not.toThrow();
+    expect(() => compileFramePrompt({ frameDescription: SCENE, concepts: props(9), continuity })).not.toThrow();
+    expect(codeOf(() => compileFramePrompt({ frameDescription: SCENE, concepts: props(10), continuity })))
+      .toBe("too_many_concepts");
+    try {
+      compileFramePrompt({ frameDescription: SCENE, concepts: props(10), continuity });
+      throw new Error("expected rejection");
+    } catch (err) {
+      expect((err as AppError).message).toContain("10 concepts");
+      expect((err as AppError).message).toContain("at most 9");
+      expect((err as AppError).message).toContain("Remove 1");
+    }
+  });
+
+  it("counts imageless attachments while continuity still supplies only one image", () => {
+    const continuity = { imageBase64: "SOURCE", imageMimeType: "image/jpeg" };
+    const imageless = Array.from({ length: 9 }, (_, i) => concept(`Prop${i}`, "prop", { image: false }));
+    const result = compileFramePrompt({ frameDescription: SCENE, concepts: imageless, continuity });
+    expect(result.parts).toHaveLength(2);
+    expect(result.prompt).toContain("Reference image 1 — Continuity source frame");
+    expect(codeOf(() => compileFramePrompt({
+      frameDescription: SCENE,
+      concepts: [...imageless, concept("Tenth", "prop", { image: false })], continuity,
+    }))).toBe("too_many_concepts");
+  });
+
+  it("keeps the four-character cap independent of the continuity slot", () => {
+    const continuity = { imageBase64: "SOURCE", imageMimeType: "image/jpeg" };
+    expect(() => compileFramePrompt({
+      frameDescription: SCENE, concepts: [...characters(4), ...props(5)], continuity,
+    })).not.toThrow();
+    expect(codeOf(() => compileFramePrompt({
+      frameDescription: SCENE, concepts: characters(5), continuity,
+    }))).toBe("too_many_characters");
+  });
+
+  it("accepts a source without concepts and rejects an empty authored scene", () => {
+    const continuity = { imageBase64: "SOURCE", imageMimeType: "image/jpeg" };
+    expect(() => compileFramePrompt({ frameDescription: SCENE, concepts: [], continuity })).not.toThrow();
+    expect(codeOf(() => compileFramePrompt({
+      frameDescription: " \n\t ", concepts: [], continuity,
+    }))).toBe("empty_frame_description");
   });
 
   it("rejects an empty frame description", () => {

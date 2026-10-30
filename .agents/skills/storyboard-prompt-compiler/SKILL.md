@@ -130,6 +130,9 @@ Scene: <frame.description, verbatim>
 ```
 
 Followed by image parts in the same order the "Reference image N" lines appear.
+When a continuity source is supplied, its image and numbered label follow every
+concept reference. Imageless concepts remain in the concept text block and do
+not consume an image number. With no concepts, continuity is image 1.
 
 ### Constants
 
@@ -146,6 +149,11 @@ costume, the same materials — while placing them in the scene described.
 OUTPUT_CONSTRAINTS:
 Render exactly one image. Compose it as a single continuous frame with no
 panel divisions, borders, captions, or text overlays.
+```
+
+```
+CONTINUITY_REFERENCE_TEMPLATE:
+Reference image {N} — Continuity source frame: use this image as the visual starting point for this scene.
 ```
 
 The preamble carries no visual style. Style is the user's responsibility, expressed inline in the frame description — that is a deliberate v1 scope decision, not an omission to fix.
@@ -183,7 +191,7 @@ Run before compiling. Reject with `422` and a specific message.
 | Rule | Limit | Reason |
 |---|---|---|
 | Character concepts per frame | 4 | `gemini-3.1-flash-image` guarantees resemblance for at most 4 |
-| Total concepts per frame | 10 | High-fidelity object cap |
+| Total concepts per frame | 10 without continuity, 9 with continuity | One slot is reserved for the source image; all attached concepts count, even imageless ones |
 | Frame description | Non-empty | Concepts alone do not describe a shot |
 
 Exceeding the character cap does not error upstream — faces blend and drift instead. Catch it locally.
