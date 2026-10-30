@@ -26,11 +26,10 @@ export function Settings() {
     setBusy("key");
     setError(null);
     try {
-      // The server validates the key against Gemini before storing it, so a bad
-      // key is reported here rather than on the next generation.
+      // The server checks key acceptance; model access is tested on generation.
       setUser(await api.updateMe({ geminiApiKey: geminiApiKey.trim() }));
       setGeminiApiKey("");
-      flash("API key updated");
+      flash("API key saved; generation access has not been checked");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
     } finally {
@@ -82,6 +81,7 @@ export function Settings() {
               ? `A key ending in ${user.geminiKeyHint} is stored. It cannot be shown again — enter a new one to replace it.`
               : "No key stored. Descriptions and frames cannot be generated until you add one."}
           </p>
+          <p className="muted">Saving checks whether Gemini accepts the key. Model access and billing are checked when you generate.</p>
           <form className="row" onSubmit={onSaveKey}>
             <input
               type="password"

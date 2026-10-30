@@ -51,13 +51,13 @@ export async function register(body: RegisterBody): Promise<AuthResponse> {
     throw new AppError(409, "username_taken", "That username is already taken.");
   }
 
-  // Validate the key BEFORE creating anything, so a typo is caught in the
-  // registration form rather than on the user's first generation.
+  // Check key acceptance BEFORE creating anything. Model access and billing
+  // are checked by the first generation, not by this metadata request.
   if (!(await validateApiKey(body.geminiApiKey))) {
     throw new AppError(
       422,
       "invalid_api_key",
-      "That Gemini API key was rejected. Check it and try again.",
+      "Gemini rejected that API key. Check it and try again.",
     );
   }
 
@@ -134,7 +134,7 @@ export async function updateMe(
       throw new AppError(
         422,
         "invalid_api_key",
-        "That Gemini API key was rejected. Check it and try again.",
+        "Gemini rejected that API key. Check it and try again.",
       );
     }
     const sealed = encryptSecret(body.geminiApiKey);

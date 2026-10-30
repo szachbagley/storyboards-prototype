@@ -141,7 +141,7 @@ const waitFor = async (fn) => {
   throw new Error("fixture condition did not settle");
 };
 const status = async (id) => (await db.query(
-  "SELECT status, error_code, input_snapshot, image_key FROM generations WHERE id = $1", [id])).rows[0];
+  "SELECT status, error_code, error_message, input_snapshot, image_key FROM generations WHERE id = $1", [id])).rows[0];
 
 try {
   const a = await request("POST", "/auth/register", null,
@@ -323,6 +323,18 @@ try {
   await waitFor(async () => (await status(rejected.generationId)).status === "failed");
   assert.equal((await status(rejected.generationId)).error_code, "invalid_api_key");
   console.log("offline app: invalid_api_key retained in shared terminal taxonomy");
+
+  const restricted = new Error("fixture model access denied");
+  restricted.status = 403;
+  state.nextGenerationError = restricted;
+  const accessDenied = await request("POST", `/frames/${frame.id}/generate`, a.token,
+    { requestId: "7f11623e-604b-4293-b875-2beea723cb57" }, 202);
+  await waitFor(async () => (await status(accessDenied.generationId)).status === "failed");
+  const deniedStatus = await status(accessDenied.generationId);
+  assert.equal(deniedStatus.error_code, "api_key_access_denied");
+  assert.match(deniedStatus.error_message, /project status/);
+  assert.equal(deniedStatus.error_message.includes("fixture model access denied"), false);
+  console.log("offline app: model/project access denial is distinct and safely reported");
 
   const faultRequestIds = {
     after: "29919f8c-079e-4e06-8456-7135cd8e0192",

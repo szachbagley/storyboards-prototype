@@ -4,6 +4,7 @@ const create = vi.hoisted(() => vi.fn());
 vi.mock("../src/services/keyValidationTransport.js", () => ({ requestKeyValidation: create }));
 
 import { validateApiKey } from "../src/services/gemini.js";
+import { classifyGeminiError } from "../src/services/geminiErrors.js";
 
 function sdkError(status: number, payload: object): Error & { status: number } {
   return Object.assign(new Error(JSON.stringify(payload)), { name: "ApiError", status });
@@ -53,26 +54,21 @@ describe("account API key validation", () => {
     const key = "fixture-secret-sentinel";
     create.mockRejectedValue(sdkError(503, { error: { message: `rejected ${key}` } }));
     const error = await validateApiKey(key).catch((error: unknown) => error);
-    expect(error).toMatchObject({ status: 502, code: "upstream_error" });
+    expect(error).toMatchObject({ status: 503, code: "upstream_error" });
     expect(String(error)).not.toContain(key);
     expect(vi.mocked(console.error).mock.calls).toEqual([
       ["[gemini] key validation could not complete status=503 stage=starting"],
     ]);
   });
 
-  it("accepts a successful interaction even if it has no output text", async () => {
-    create.mockResolvedValue({ status: "completed" });
+  it("accepts a successful metadata response without claiming inference", async () => {
+    create.mockResolvedValue(undefined);
     await expect(validateApiKey("dummy-key")).resolves.toBe(true);
-  });
-
-  it("does not save a response that failed without throwing", async () => {
-    create.mockResolvedValue({ status: "failed" });
-    await expect(validateApiKey("dummy-key")).rejects.toMatchObject({ status: 502, code: "upstream_error" });
   });
 
   it("bounds the whole call, aborts transport, and ignores a late success", async () => {
     vi.useFakeTimers();
-    let finish: (result: object) => void = () => {};
+    let finish: () => void = () => {};
     create.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     const result = validateApiKey("dummy-key");
     const outcome = expect(result).rejects.toMatchObject({ status: 504, code: "timeout" });
@@ -85,14 +81,14 @@ describe("account API key validation", () => {
       ["[gemini] key validation deadline stage=starting stage_reached_at_ms=0"],
     ]);
     expect(vi.getTimerCount()).toBe(0);
-    finish({ status: "completed" });
+    finish();
     await expect(result).rejects.toMatchObject({ status: 504, code: "timeout" });
     expect(create).toHaveBeenCalledOnce();
   });
 
   it("clears the application deadline on both success and failure", async () => {
     vi.useFakeTimers();
-    create.mockResolvedValueOnce({ status: "completed" });
+    create.mockResolvedValueOnce(undefined);
     await expect(validateApiKey("dummy-key")).resolves.toBe(true);
     expect(vi.getTimerCount()).toBe(0);
     create.mockRejectedValueOnce(invalidKey);
@@ -106,12 +102,23 @@ describe("account API key validation", () => {
       [sdkError(429, { error: { status: "RESOURCE_EXHAUSTED" } }), 503, "upstream_error"],
       [Object.assign(new Error("request timed out"), { name: "APIConnectionTimeoutError" }), 504, "timeout"],
       [new DOMException("request timed out", "TimeoutError"), 504, "timeout"],
-      [sdkError(503, { error: { status: "UNAVAILABLE" } }), 502, "upstream_error"],
+      [sdkError(503, { error: { status: "UNAVAILABLE" } }), 503, "upstream_error"],
     ] as const) {
       create.mockRejectedValueOnce(error);
       await expect(validateApiKey("dummy-key")).rejects.toMatchObject({
         status: expectedStatus, code: expectedCode,
       });
     }
+  });
+
+  it("distinguishes generation credential rejection from model/project access", () => {
+    expect(classifyGeminiError(invalidKey)).toMatchObject({ code: "invalid_api_key", status: 422 });
+    expect(classifyGeminiError(sdkError(401, { error: { status: "UNAUTHENTICATED" } })))
+      .toMatchObject({ code: "invalid_api_key", status: 422 });
+    const restricted = classifyGeminiError(sdkError(403, { error: { status: "PERMISSION_DENIED" } }));
+    expect(restricted).toMatchObject({ code: "api_key_access_denied", status: 422 });
+    expect(restricted.message).toContain("project status");
+    expect(classifyGeminiError(sdkError(400, { error: { status: "INVALID_ARGUMENT" } })))
+      .toMatchObject({ code: "invalid_input", status: 502 });
   });
 });

@@ -6,7 +6,7 @@ import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
 import { once, getEventListeners } from "node:events";
 import { API_KEY_VALIDATION_DEADLINE_MS, API_KEY_VALIDATION_URL,
-  API_KEY_VALIDATION_MAX_RESPONSE_BYTES, DESCRIPTION_MODEL, DESCRIPTION_THINKING_LEVEL } from "@storyboards/shared";
+  API_KEY_VALIDATION_MAX_RESPONSE_BYTES } from "@storyboards/shared";
 
 if (!globalThis.__package1Outbound) throw new Error("offline guard was not preloaded");
 const originalRequest = https.request;
@@ -24,13 +24,10 @@ const gcTimer = typeof globalThis.gc === "function" ? setInterval(() => globalTh
 const server = http.createServer((request, response) => {
   const requestChunks = [];
   request.on("data", (chunk) => requestChunks.push(chunk));
-  request.on("end", () => assert.deepEqual(JSON.parse(Buffer.concat(requestChunks).toString()), {
-    model: DESCRIPTION_MODEL, input: [{ type: "text", text: "Reply with the single word: ok" }],
-    generation_config: { thinking_level: DESCRIPTION_THINKING_LEVEL },
-  }));
+  request.on("end", () => assert.equal(Buffer.concat(requestChunks).length, 0, "metadata request must not generate"));
   requests += 1;
-  assert.equal(request.method, "POST");
-  assert.equal(request.url, "/v1beta/interactions");
+  assert.equal(request.method, "GET");
+  assert.equal(request.url, "/v1beta/models?pageSize=1");
   assert.equal(request.headers["x-goog-api-key"], key);
   const scenario = scenarios.shift();
   assert.ok(scenario, "unexpected retry/request");
@@ -56,10 +53,10 @@ try {
   // handling stay intact, and the socket guard rejects any remote connection.
   https.request = (url, init, callback) => {
     assert.equal(url, API_KEY_VALIDATION_URL);
-    assert.equal(init.method, "POST");
+    assert.equal(init.method, "GET");
     const call = { signal: init.signal, requestClosed: false };
     calls.push(call);
-    const request = http.request(`${origin}/v1beta/interactions`, init, callback);
+    const request = http.request(`${origin}/v1beta/models?pageSize=1`, init, callback);
     request.on("socket", (socket) => { call.socket = socket; });
     request.once("close", () => { call.requestClosed = true; });
     return request;
@@ -92,17 +89,17 @@ try {
     [400, "OTHER", { status: 502, code: "upstream_error" }],
     [403, "PERMISSION_DENIED", { status: 422, code: "api_key_access_denied" }],
     [429, "RESOURCE_EXHAUSTED", { status: 503, code: "upstream_error" }],
-    [503, "UNAVAILABLE", { status: 502, code: "upstream_error" }],
+    [503, "UNAVAILABLE", { status: 503, code: "upstream_error" }],
     [504, "DEADLINE_EXCEEDED", { status: 504, code: "timeout" }],
   ]) {
     assert.deepEqual(await call({ status, body: errorBody(status, reason) }), expected);
   }
-  assert.equal(await call({ status: 200, body: { id: "fixture", status: "completed", steps: [] } }), true);
-  assert.deepEqual(await call({ status: 200, body: { id: "fixture", status: "failed", steps: [] } }),
-    { status: 502, code: "upstream_error" });
+  assert.equal(await call({ status: 200, body: { models: [{ name: "models/fixture" }] } }), true);
+  assert.equal(await call({ status: 200, body: {} }), true);
   for (const scenario of [
     { status: 200, raw: "{malformed" },
     { status: 200, raw: "" },
+    { status: 200, body: { models: "bad" } },
     { status: 200, oversized: true },
     { status: 302, headers: { Location: `${origin}/must-not-follow` }, raw: "" },
   ]) {
@@ -150,11 +147,11 @@ try {
   const elapsedMs = performance.now() - began;
   assert.ok(elapsedMs >= API_KEY_VALIDATION_DEADLINE_MS - 1000 &&
     elapsedMs < API_KEY_VALIDATION_DEADLINE_MS + 5000, "validation deadline exceeded");
-  assert.equal(requests, 20, "one request per validation; no retries or redirects");
+  assert.equal(requests, 21, "one request per validation; no retries or redirects");
   assert.equal(scenarios.length, 0);
   assert.equal(logs.some((line) => line.includes(key)), false, "key leaked in validation logs");
   assert.equal(globalThis.__package1Outbound.blocked, 0);
-  console.log(`key17 transport: 20 loopback requests; errors, empty-text success, byte cap, redirect rejection, redaction, 20s deadlines, direct transport settlement and 7 active-response cancellations passed; forced GC=${Boolean(gcTimer)}; real outbound=0`);
+  console.log(`key17 transport: 21 loopback metadata requests; errors, byte cap, redirect rejection, redaction, 20s deadlines, direct transport settlement and 7 active-response cancellations passed; forced GC=${Boolean(gcTimer)}; real outbound=0`);
 } finally {
   clearTimeout(watchdog);
   clearInterval(gcTimer);

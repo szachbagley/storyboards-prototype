@@ -14,7 +14,7 @@ import {
 } from "@storyboards/shared";
 import { AppError } from "../lib/AppError.js";
 import type { InputPart } from "./promptCompiler.js";
-import { classifyGeminiError } from "./geminiErrors.js";
+import { classifyGeminiError, hasInvalidKeyReason } from "./geminiErrors.js";
 import { requestKeyValidation, type KeyValidationStage } from "./keyValidationTransport.js";
 
 // The only module in the project that imports the Gemini SDK.
@@ -79,7 +79,8 @@ async function withRetryAndDeadline<T>(
       lastError = err;
 
       const classified = classifyGeminiError(err);
-      console.error(`[gemini] ${label} failed code=${classified.code} attempt=${attempt + 1}`, err);
+      // SDK errors can embed upstream response text, including key material.
+      console.error(`[gemini] ${label} failed code=${classified.code} attempt=${attempt + 1}`);
 
       if (!classified.retryable || attempt === RATE_LIMIT_MAX_RETRIES) {
         throw new AppError(classified.status, classified.code, classified.message);
@@ -200,9 +201,9 @@ export async function generateImage(apiKey: string, parts: InputPart[]): Promise
 }
 
 /**
- * Check that a user-supplied API key actually works, with the cheapest call
- * available. Used at registration and whenever a key is replaced, so a typo is
- * caught in the form rather than forty seconds into a frame generation.
+ * Check that Gemini accepts a user-supplied API key through read-only model
+ * metadata. This cannot establish project billing, model entitlement, or
+ * whether an inference call will complete.
  *
  * Returns a boolean rather than throwing: the caller turns it into a 422 with a
  * message about the key, and any other upstream problem should not be reported
@@ -223,15 +224,10 @@ export async function validateApiKey(apiKey: string): Promise<boolean> {
     }, API_KEY_VALIDATION_DEADLINE_MS);
   });
   try {
-    const interaction = await Promise.race([requestKeyValidation(apiKey, controller.signal, (next, elapsedMs) => {
+    await Promise.race([requestKeyValidation(apiKey, controller.signal, (next, elapsedMs) => {
       stage = next;
       stageReachedAtMs = elapsedMs;
     }), deadline]);
-    if (interaction.status !== "completed") {
-      throw new AppError(502, "upstream_error", "Gemini did not complete key verification. Try again.");
-    }
-    // A completed interaction proves the key was accepted. Its generated text
-    // can be empty for reasons unrelated to authentication.
     return true;
   } catch (err) {
     if (err instanceof AppError) throw err;
@@ -246,13 +242,17 @@ export async function validateApiKey(apiKey: string): Promise<boolean> {
     if (status === 429) {
       throw new AppError(503, "upstream_error", "Gemini is rate limiting key checks. Try again shortly.");
     }
+    if (status === 503) {
+      console.error(`[gemini] key validation could not complete status=${status} stage=${stage}`);
+      throw new AppError(503, "upstream_error", "Gemini key checking is temporarily unavailable. Try again later.");
+    }
     // The SDK wraps timeouts before headers arrive, but response body reads
     // can throw the native fetch TimeoutError directly.
     if (status === 504 || (err instanceof Error &&
       (err.name === "APIConnectionTimeoutError" || err.name === "TimeoutError"))) {
       throw validationTimeout();
     }
-    // SDK messages can contain the upstream JSON body. Never log that body or
+    // Upstream errors can contain the response body. Never log that body or
     // the plaintext key; the status alone is enough for safe diagnostics.
     console.error(`[gemini] key validation could not complete status=${status ?? "unknown"} stage=${stage}`);
     if (status === 400) {
@@ -274,27 +274,4 @@ function validationStatus(error: unknown): number | undefined {
   const candidate = error as { status?: unknown; statusCode?: unknown };
   const status = candidate.status ?? candidate.statusCode;
   return typeof status === "number" ? status : undefined;
-}
-
-// SDK releases expose JSON in `message` (ApiError) or `body` / `error`
-// (Interactions wrappers). Match the structured ErrorInfo reason, never an
-// arbitrary 400 or a free-text phrase.
-function hasInvalidKeyReason(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const candidate = error as { error?: unknown; body?: unknown; message?: unknown };
-  const sources = [candidate.error, candidate.body, candidate.message];
-  for (const source of sources) {
-    let value: unknown = source;
-    if (typeof source === "string") {
-      try { value = JSON.parse(source) as unknown; } catch { continue; }
-    }
-    if (typeof value !== "object" || value === null) continue;
-    const payload = value as { error?: unknown; details?: unknown };
-    const inner = typeof payload.error === "object" && payload.error !== null
-      ? payload.error as { details?: unknown } : payload;
-    if (Array.isArray(inner.details) && inner.details.some((detail: unknown) =>
-      typeof detail === "object" && detail !== null &&
-      (detail as { reason?: unknown }).reason === "API_KEY_INVALID")) return true;
-  }
-  return false;
 }
