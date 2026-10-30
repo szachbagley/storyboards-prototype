@@ -1,14 +1,14 @@
 import {
+  effectiveConceptLimit,
   IMAGE_MIME_TYPE,
   MAX_CHARACTER_CONCEPTS,
-  MAX_TOTAL_CONCEPTS,
   type ConceptType,
 } from "@storyboards/shared";
 import { AppError } from "../lib/AppError.js";
 
 // The prompt compiler (TECH_SPEC.md section 8.4).
 //
-// SOURCE OF TRUTH for the two constants below:
+// SOURCE OF TRUTH for the prompt-text constants below:
 // .agents/skills/storyboard-prompt-compiler/SKILL.md
 // They are transcribed verbatim and must stay byte-identical to that skill;
 // server/test/promptCompiler.test.ts enforces it. The skill is documentation
@@ -25,6 +25,10 @@ import { AppError } from "../lib/AppError.js";
 export const FORMAT_PREAMBLE = "Generate a single storyboard frame for a film production.\n\nThe reference images below establish how specific subjects must look.\nReproduce each referenced subject faithfully — the same face, the same\ncostume, the same materials — while placing them in the scene described.";
 
 export const OUTPUT_CONSTRAINTS = "Render exactly one image. Compose it as a single continuous frame with no\npanel divisions, borders, captions, or text overlays.";
+
+export const CONTINUITY_REFERENCE_TEMPLATE = "Reference image {N} — Continuity source frame: use this image as the visual starting point for this scene.";
+
+export const CONTINUITY_RULES = "Preserve visual details from the continuity source frame unless the Scene explicitly changes them.\nFollow explicit Scene instructions over conflicting details in the continuity source or concept references.\nUse the concept references to establish subject identity; use the continuity source for otherwise unspecified visual details.\nDo not copy panel divisions, borders, captions, or text overlays from the continuity source.";
 
 export interface CompilerConcept {
   id: string;
@@ -43,6 +47,7 @@ export interface CompilerInput {
    *  never sorts: ord is the user's chosen order and it becomes the
    *  reference-image enumeration order. */
   concepts: CompilerConcept[];
+  continuity?: { imageBase64: string; imageMimeType: string } | null;
 }
 
 export type InputPart =
@@ -79,11 +84,12 @@ export function validateFrameForGeneration(input: CompilerInput): void {
     );
   }
 
-  if (input.concepts.length > MAX_TOTAL_CONCEPTS) {
+  const conceptLimit = effectiveConceptLimit(input.continuity != null);
+  if (input.concepts.length > conceptLimit) {
     throw new AppError(
       422,
       "too_many_concepts",
-      `${input.concepts.length} concepts are attached, but at most ${MAX_TOTAL_CONCEPTS} are supported. Remove ${input.concepts.length - MAX_TOTAL_CONCEPTS}.`,
+      `${input.concepts.length} concepts are attached, but at most ${conceptLimit} are supported. Remove ${input.concepts.length - conceptLimit}.`,
     );
   }
 }
@@ -101,6 +107,12 @@ export function compileFramePrompt(input: CompilerInput): CompiledPrompt {
   const imageParts: InputPart[] = [];
   let referenceIndex = 0;
 
+  function appendImageReference(lineTemplate: string, imageMimeType: string, imageBase64: string): string {
+    referenceIndex += 1;
+    imageParts.push({ type: "image", mime_type: imageMimeType, data: imageBase64 });
+    return lineTemplate.replace("{N}", String(referenceIndex));
+  }
+
   for (const concept of input.concepts) {
     const label = `${concept.name} (${concept.type})`;
     // A concept may legitimately have no description yet -- concepts are created
@@ -114,22 +126,23 @@ export function compileFramePrompt(input: CompilerInput): CompiledPrompt {
       // desync is the highest-severity failure mode in the system: it makes the
       // model attach the wrong description to the wrong subject, which presents
       // as random inconsistency and points at nothing.
-      referenceIndex += 1;
-      lines.push(`Reference image ${referenceIndex} \u2014 ${body}`);
-      imageParts.push({
-        type: "image",
-        mime_type: concept.imageMimeType ?? IMAGE_MIME_TYPE,
-        data: concept.imageBase64,
-      });
+      lines.push(appendImageReference(`Reference image {N} \u2014 ${body}`,
+        concept.imageMimeType ?? IMAGE_MIME_TYPE, concept.imageBase64));
     } else {
       lines.push(body);
     }
   }
 
+  const continuityLine = input.continuity != null
+    ? appendImageReference(CONTINUITY_REFERENCE_TEMPLATE,
+      input.continuity.imageMimeType, input.continuity.imageBase64)
+    : null;
+
   const sections: string[] = [FORMAT_PREAMBLE];
   // A frame with no attached concepts is legal -- it is simply a text-to-image
   // prompt -- and must not leave a ragged double blank line.
   if (lines.length > 0) sections.push(lines.join("\n"));
+  if (continuityLine !== null) sections.push(continuityLine, CONTINUITY_RULES);
   // Verbatim and untrimmed. This is the user's authored intent (invariant 6).
   sections.push(`Scene: ${input.frameDescription}`);
   sections.push(OUTPUT_CONSTRAINTS);

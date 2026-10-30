@@ -26,6 +26,13 @@ export const IMAGE_MIME_TYPE = "image/jpeg" as const;
 // so they are validated locally before every generation.
 export const MAX_CHARACTER_CONCEPTS = 4;
 export const MAX_TOTAL_CONCEPTS = 10;
+export const CONTINUITY_REFERENCE_SLOTS = 1;
+
+/** Count attachments, including concepts without images, before fetching any
+ * reference bytes. A configured continuity source reserves one image slot. */
+export function effectiveConceptLimit(hasContinuity: boolean): number {
+  return MAX_TOTAL_CONCEPTS - (hasContinuity ? CONTINUITY_REFERENCE_SLOTS : 0);
+}
 
 // --- Generation timing ----------------------------------------------------
 // Total wall-clock budget for one generation task, rate-limit retries

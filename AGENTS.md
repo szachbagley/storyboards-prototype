@@ -101,9 +101,9 @@ Violating any of these is a bug even if the code runs.
 
 **4. Concept descriptions are identity-only.** No pose, environment, lighting, camera, or action. See the `storyboard-prompt-compiler` skill. This rule is enforced in the meta-prompt, the UI placeholder, and the compiler. A violation produces no error — just quietly bad images.
 
-**5. Enumeration order must match image part order.** If the compiled text says "Reference image 2 — Castle", the second image part must be Castle's. Desync causes the model to attach the wrong description to the wrong subject, which presents as random inconsistency and is miserable to diagnose.
+**5. Enumeration order must match image part order.** If the compiled text says "Reference image 2 — Castle", the second image part must be Castle's. Imaged concepts remain in attachment order; an explicit continuity image, when supplied, is last. Imageless concepts do not consume an image number. Desync causes the model to attach the wrong description to the wrong subject, which presents as random inconsistency and is miserable to diagnose.
 
-**6. The frame description is inserted verbatim.** Never paraphrase, reorder, summarize, or "improve" the user's authored scene text in the compiler.
+**6. The frame description is inserted verbatim.** Never paraphrase, reorder, summarize, or "improve" the user's authored scene text in the compiler. With explicit continuity, the exact compiler rules give explicit Scene changes precedence over conflicting source or concept reference details; they do not rewrite any input text.
 
 **7. Snapshot before generating.** `compiled_prompt` and `input_snapshot` are written to the `generations` row **before** the API call, not after. Concepts are mutable; without the snapshot, editing one destroys the provenance of every frame made from it.
 
@@ -171,7 +171,7 @@ npm run migrate --workspace=server
 Minimal but non-zero. Five areas earn tests:
 
 1. **Prompt compiler** — order matching, missing-image concepts, verbatim passthrough of the frame description.
-2. **Validation** — the 4-character and 10-total concept caps.
+2. **Validation** — the 4-character cap and effective concept limit: 10 without continuity, 9 with it.
 3. **Position arithmetic** — append, insert-between, reorder.
 4. **Meta-prompt fidelity** — the description meta-prompts must stay byte-identical to the `storyboard-prompt-compiler` skill.
 5. **Credential handling** — password hash/verify, session token generation and hashing, Gemini key encrypt/decrypt. Pure functions whose failure modes are silent and total.
