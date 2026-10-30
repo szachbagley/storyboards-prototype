@@ -45,10 +45,12 @@ These are current as of August 2026 and differ from what you likely learned. Do 
 
 Use `ai.interactions.create({ ... })`. Do **not** use `generateContent`, `getGenerativeModel`, or the `@google/generative-ai` package. The correct package is **`@google/genai`**.
 
-Account key validation is a narrow exception: `server/src/services/keyValidationTransport.ts`
-sends a bounded direct POST to the same Interactions endpoint to avoid lost
-abort propagation in the tested SDK request-cloning path. See the credential
-handling section of `TECH_SPEC.md`. Generation and description keep using the SDK.
+Account key acceptance is a narrow exception: `server/src/services/keyValidationTransport.ts`
+sends a bounded, non-generative GET to Google's `models.list` endpoint to avoid
+lost abort propagation in the tested SDK request-cloning path. It checks only
+that Gemini accepts the key, not inference or application-model availability.
+See the credential handling section of `TECH_SPEC.md`. Generation and
+description keep using the SDK.
 
 ```ts
 import { GoogleGenAI } from "@google/genai";
@@ -123,6 +125,7 @@ Violating any of these is a bug even if the code runs.
 - **No ORM.** Use `pg` with parameterized queries. Migrations are numbered `.sql` files in `server/migrations/`, applied in order.
 - **Validate at the boundary.** Zod schemas on every request body, in `shared/` so the client can reuse them.
 - **Errors are typed.** Generation failures carry an `error_code` from the taxonomy in `TECH_SPEC.md` §8.6 — never a bare boolean or a raw upstream message.
+- **Saving a key does not verify generation access.** Registration and Settings use read-only model metadata. Inference errors give safe guidance when description or image generation runs.
 - **No comments that restate the code.** Comment the non-obvious: why the sweep exists, why order matters, why a value is case-sensitive.
 - **Server code is layered** as `routes/ → services/ → db/`. Routes parse and respond. Services hold logic. DB holds SQL. Gemini and S3 calls live in `services/`.
 

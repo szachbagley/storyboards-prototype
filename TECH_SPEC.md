@@ -26,7 +26,9 @@ This is a **rough proof-of-concept** built as a rapid AI-development exercise. S
 | Image generation | `gemini-3.1-flash-image` (Nano Banana 2) | Gemini API |
 | Image description | `gemini-3.7-flash` | Gemini API |
 
-**SDK:** `@google/genai` (JavaScript). All Gemini calls go through the **Interactions API** (`ai.interactions.create`), which is the currently recommended surface.
+**SDK:** `@google/genai` (JavaScript). Description and image generation use the
+**Interactions API** (`ai.interactions.create`). Registration and Settings use
+the read-only `models.list` metadata endpoint solely to check key acceptance.
 
 ---
 
@@ -352,7 +354,8 @@ A boolean failure state is not sufficient here. Storyboards skew violent — the
 | `invalid_input` | Validation failure | Specific field guidance |
 | `upstream_error` | 5xx or SDK error | Offer retry |
 | `abandoned` | Swept by §7.1 | Offer retry |
-| `invalid_api_key` | The caller's own Gemini key was rejected (401/403) | Tell them to update it in Settings; retrying cannot help |
+| `invalid_api_key` | The caller's key was rejected (401, or structured 400/403 `API_KEY_INVALID`) | Tell them to update it in Settings; retrying cannot help |
+| `api_key_access_denied` | Inference returned 403 without `API_KEY_INVALID` | Check key restrictions, project eligibility and billing in AI Studio |
 
 `rate_limited` is the only code that auto-retries — twice, with exponential backoff.
 
@@ -384,9 +387,9 @@ This is not cosmetic. Reference images gain nothing from being 12 megapixels, an
 
 Accounts with username and password. Sessions are opaque bearer tokens.
 
-- `POST /auth/register` takes `{ username, password, geminiApiKey }`. The key is
-  validated against Gemini before the account is created, so a typo is caught in
-  the form rather than on the first generation.
+- `POST /auth/register` takes `{ username, password, geminiApiKey }`. A
+  non-generative metadata check confirms Gemini accepts the key before the
+  account is created. Model access is checked only when generation runs.
 - `POST /auth/login` returns `{ token, user }`. The token is 32 random bytes,
   base64url-encoded, sent as `Authorization: Bearer <token>`.
 - Sessions are stored as `sha256(token)` in a `sessions` table, so a database
@@ -421,15 +424,20 @@ server's `ENCRYPTION_KEY`. It is decrypted only at the call site in
 returned by any endpoint — `GET /auth/me` exposes only `hasGeminiKey` and a
 4-character hint.
 
-Registration and Settings verify a candidate key with one interaction before
-encrypting or saving it. A completed interaction establishes that the key was
-accepted even if the model returned no text. An HTTP 400 is an invalid-key
-response only when its structured ErrorInfo reason is `API_KEY_INVALID`; other
-400s may indicate a malformed validation request. Permission, rate-limit,
-timeout, and upstream failures return safe, distinct guidance. A failed check
-leaves any previously saved encrypted key unchanged. Validation enforces a 20s
-application deadline, signals abort to its validation transport on expiry, and
-disables automatic retries. The timer is cleared when validation settles.
+Registration and Settings check a candidate key using Google's read-only
+[`GET /v1beta/models?pageSize=1`](https://ai.google.dev/api/models) before
+encrypting or saving it. HTTP 200 with well-formed JSON confirms only that
+Gemini accepts the key. It does **not** establish project tier eligibility,
+billing readiness, inference availability, or access to either application
+model; Google [documents this limitation](https://ai.google.dev/gemini-api/docs/troubleshooting).
+The UI states it, and generation/description errors surface model-access
+failures when they occur. An HTTP 400 is an invalid-key response only when its
+structured ErrorInfo reason is `API_KEY_INVALID`; other 400s can indicate a
+request error. Permission, rate-limit, timeout, and upstream failures return
+safe, distinct guidance. A failed check leaves any previously saved encrypted
+key unchanged. The check has a 20s application deadline, aborts its transport
+on expiry, and makes no automatic retries. The timer is cleared on settlement.
+An upstream HTTP 503 is returned as a safe HTTP 503; no candidate key is saved.
 Timeouts before headers or while reading the response body return HTTP 504. Server logs never include the
 candidate key or raw upstream response body.
 On a deadline, a safe server log records the last transport stage and when it
@@ -439,10 +447,10 @@ system; it does not prove Gemini received the request. These stage markers
 distinguish a connection or TLS stall from waiting for an upstream response
 without logging key material, response bodies, or network addresses.
 
-Account key validation uses a dedicated direct POST to the same
-[`v1beta/interactions` endpoint](https://ai.google.dev/api/interactions-api), with
-the same model, input and thinking level as before. It rejects redirects and
-caps response bodies at 1 MiB. This narrow exception to SDK usage uses Node
+Account key acceptance uses a dedicated direct GET to the
+[`v1beta/models` metadata endpoint](https://ai.google.dev/api/models), with
+`pageSize=1` and no generation. It rejects redirects and caps response bodies
+at 1 MiB. This narrow exception to SDK usage uses Node
 HTTPS to own the request and response streams explicitly, destroys both on
 abort/overflow, and removes its abort listener when settled. The SDK 2.17.1
 request-cloning path lost abort propagation after garbage collection in
@@ -452,7 +460,7 @@ the full transport matrix passes on both runtimes with forced collection.
 Generation and description still use the SDK; no SDK or runtime upgrade is
 included. The earlier failing SDK fixture is preserved in commit `98abf303`.
 
-After building, `server/scripts/verify-key17-transport.mjs` exercises validation
+After building, `server/scripts/verify-key17-transport.mjs` exercises key acceptance
 over loopback HTTP, including the full 20s deadline, direct transport settlement,
 abort dispatch, body cancellation, oversized responses and redirect rejection.
 `server/scripts/verify-key17-app.mjs` verifies encrypted persistence using its
@@ -464,8 +472,10 @@ Cancellation checks observe unfinished HTTP/1.1 responses closing, not every
 pooled socket: idle keep-alive connections may remain/reopen. Raw transport
 promises must reject without relying on the application's deadline race.
 
-These offline checks do not establish the cause of the reported live Settings
-502, whose sanitized response is still needed, or verify live key/model access.
+These offline checks do not establish live key acceptance or inference access.
+The earlier production failures occurred during the completed-generation check:
+an upstream HTTP 503 and a separate 20s deadline. The metadata path has not
+been verified against a live key.
 
 Losing `ENCRYPTION_KEY` makes every stored key unrecoverable; users would have
 to re-enter them.

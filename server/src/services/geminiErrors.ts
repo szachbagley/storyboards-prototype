@@ -60,11 +60,20 @@ export function classifyGeminiError(err: unknown): ClassifiedGeminiError {
   // Must precede the generic 4xx branch below, which would otherwise swallow a
   // 401. The key belongs to the user now, so this is something they can fix --
   // and retrying without changing it cannot possibly help.
-  if (status === 401 || status === 403) {
+  if (status === 401 || ((status === 400 || status === 403) && hasInvalidKeyReason(err))) {
     return {
       code: "invalid_api_key",
       status: 422,
       message: "Your Gemini API key was rejected. Update it in Settings.",
+      retryable: false,
+    };
+  }
+
+  if (status === 403) {
+    return {
+      code: "api_key_access_denied",
+      status: 422,
+      message: "Gemini denied model access. Check this key's restrictions and project status in AI Studio.",
       retryable: false,
     };
   }
@@ -87,4 +96,25 @@ export function classifyGeminiError(err: unknown): ClassifiedGeminiError {
   }
 
   return { code: "upstream_error", status: 502, message: "The AI service is unavailable. Try again.", retryable: false };
+}
+
+// Some Google errors report API_KEY_INVALID as an HTTP 400. Match only the
+// structured reason; raw message text can name the code in unrelated prose.
+export function hasInvalidKeyReason(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { error?: unknown; body?: unknown; message?: unknown };
+  for (const source of [candidate.error, candidate.body, candidate.message]) {
+    let value: unknown = source;
+    if (typeof source === "string") {
+      try { value = JSON.parse(source) as unknown; } catch { continue; }
+    }
+    if (typeof value !== "object" || value === null) continue;
+    const payload = value as { error?: unknown; details?: unknown };
+    const inner = typeof payload.error === "object" && payload.error !== null
+      ? payload.error as { details?: unknown } : payload;
+    if (Array.isArray(inner.details) && inner.details.some((detail: unknown) =>
+      typeof detail === "object" && detail !== null &&
+      (detail as { reason?: unknown }).reason === "API_KEY_INVALID")) return true;
+  }
+  return false;
 }

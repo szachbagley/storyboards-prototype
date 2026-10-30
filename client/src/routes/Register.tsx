@@ -40,8 +40,7 @@ export function Register() {
       signIn(token, created);
       navigate("/concepts", { replace: true });
     } catch (err) {
-      // The server validates the Gemini key before creating anything, so a bad
-      // key surfaces here rather than on the first generation.
+      // Registration checks key acceptance; model access is tested on generation.
       setError(err instanceof ApiError ? describeError(err) : "Could not reach the API.");
       setBusy(false);
     }
@@ -92,6 +91,7 @@ export function Register() {
           aistudio.google.com/apikey
         </a>
         . It is encrypted before it is stored and is never shown again.
+        {" "}Saving checks key acceptance; model access and billing are checked when you generate.
       </p>
 
       <input

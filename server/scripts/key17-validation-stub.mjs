@@ -8,7 +8,5 @@ export async function requestKeyValidation(apiKey, signal) {
     fixture.nextError = null;
     throw error;
   }
-  const status = fixture.nextStatus ?? "completed";
-  fixture.nextStatus = null;
-  return fixture.emptyResponse ? { status } : { status, output_text: "ok" };
+  return;
 }

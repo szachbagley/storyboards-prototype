@@ -22,6 +22,9 @@ export const GENERATION_ERROR_CODES = [
   // which means the server built a bad request: this one the user can fix by
   // updating their key in Settings, and retrying without changing it cannot help.
   "invalid_api_key",
+  // Metadata acceptance does not prove inference access. A model/project
+  // permission failure must remain distinct from an invalid key.
+  "api_key_access_denied",
 ] as const;
 export type GenerationErrorCode = (typeof GENERATION_ERROR_CODES)[number];
 
