@@ -121,7 +121,7 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
   const failed = attempt.generation?.status === "failed" ? attempt.generation : null;
 
   function reportSaveError(error: unknown, intent: typeof edits.latest.current) {
-    if (!edits.current()) return;
+    if (!edits.current() || edits.latest.current.source.sequence !== intent.source.sequence) return;
     if (error instanceof ApiError && (error.code === "continuity_configuration_changed" ||
         error.code === "invalid_continuity_source")) {
       setReviewedFrame(edits.latest.current.frame);
@@ -132,29 +132,38 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
     setActionError(message(error));
   }
 
-  function saveOnBlur() {
+  function saveDraft(refreshSources: boolean) {
     const intent = edits.latest.current;
-    if (admissionLock.current || reviewedFrame || !intent.description.dirty) return;
     setActionError(null);
     void edits.enqueue(async () => {
-      await edits.save(intent, false);
-      if (edits.current()) setSaved(true);
+      try {
+        await edits.save(intent, false);
+      } catch (error) {
+        const latest = edits.latest.current;
+        // A newer source pick queues its own save. Its result determines whether
+        // a Generate waiting behind both writes can proceed.
+        if (latest.source.sequence !== intent.source.sequence ||
+            (!intent.source.dirty && latest.description.sequence !== intent.description.sequence)) return;
+        throw error;
+      }
+      if (!edits.current()) return;
+      const latest = edits.latest.current;
+      if (latest.source.sequence === intent.source.sequence &&
+          latest.description.sequence === intent.description.sequence) setSaved(true);
+      if (refreshSources) edits.reload();
     }).catch(error => reportSaveError(error, intent));
+  }
+
+  function saveOnBlur() {
+    if (admissionLock.current || reviewedFrame || !edits.latest.current.description.dirty) return;
+    saveDraft(false);
   }
 
   function chooseSource(id: string | null) {
     if (admissionLock.current || controlLock.current || reviewedFrame) return;
     edits.edit("source", id);
     setSaved(false);
-    setActionError(null);
-    const intent = edits.latest.current;
-    void edits.enqueue(async () => {
-      await edits.save(intent, false);
-      if (edits.current()) {
-        setSaved(true);
-        edits.reload();
-      }
-    }).catch(error => reportSaveError(error, intent));
+    saveDraft(true);
   }
 
   async function onGenerate() {
@@ -196,9 +205,8 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
     }
   }
 
-  function resolveConflict(takeCurrent: boolean) {
+  function resolveConflict(choice: string | null) {
     if (!frame || frame === reviewedFrame || controlsDisabled) return;
-    const choice = takeCurrent ? frame.continuitySourceFrameId ?? null : edits.latest.current.source.value;
     edits.edit("source", choice);
     const intent = edits.latest.current;
     void mutate("review", async () => {
@@ -275,8 +283,13 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
         <p>Review the source before generating. Your scene draft has been kept.</p>
         {frame !== reviewedFrame && <>
           <p>Intended source: {edits.source.value ?? "None"}. Current source: {frame.continuitySourceFrameId ?? "None"}.</p>
-          <button className="btn" disabled={controlsDisabled} onClick={() => resolveConflict(true)}>Use current source</button>
-          <button className="btn" disabled={controlsDisabled} onClick={() => resolveConflict(false)}>Keep intended source</button>
+          {enabled ? <>
+            <button className="btn" disabled={controlsDisabled} onClick={() => resolveConflict(frame.continuitySourceFrameId)}>Use current source</button>
+            <button className="btn" disabled={controlsDisabled} onClick={() => resolveConflict(edits.source.value)}>Keep intended source</button>
+          </> : <>
+            <p>Continuity is unavailable. Clear the source to save this scene without it.</p>
+            <button className="btn" disabled={controlsDisabled} onClick={() => resolveConflict(null)}>Clear source and save scene</button>
+          </>}
         </>}
       </div>}
       {attempt.storageWarning && <p role="status">{attempt.storageWarning}</p>}
@@ -337,8 +350,8 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
           {enabled ? <ContinuityPicker targetId={frameId} sourceId={sourceId} frames={edits.sources}
             error={candidateError} disabled={controlsDisabled || !!reviewedFrame}
             onChange={chooseSource} refresh={edits.reload} />
-          : sourceId && <p className="source-unavailable">Continuity unavailable. Current source: {sourceId}.{" "}
-              <button type="button" className="btn btn-small" disabled={controlsDisabled || !!reviewedFrame}
+          : sourceId && !reviewedFrame && <p className="source-unavailable">Continuity unavailable. Current source: {sourceId}.{" "}
+              <button type="button" className="btn btn-small" disabled={controlsDisabled}
                 onClick={() => chooseSource(null)}>Clear source</button>
             </p>}
           {edits.source.dirty && actionError && !reviewedFrame &&

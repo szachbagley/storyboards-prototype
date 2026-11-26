@@ -151,10 +151,10 @@ export function useFrameEdits(frameId: string, storyId: string) {
     const saveDescription = generationBarrier || description.dirty;
     const saveSource = generationBarrier || source.dirty;
     if (!saveDescription && !saveSource) return;
-    if (!generationBarrier && (!saveDescription || description.value === saved.description) &&
-        (!saveSource || source.value === (saved.continuitySourceFrameId ?? null))) {
-      merge(saved, { description: saveDescription ? description.sequence : undefined,
-        source: saveSource ? source.sequence : undefined });
+    // A rejected earlier source write can have reached the server. Reassert
+    // every explicit source choice, even a return to the last acknowledged ID.
+    if (!saveSource && description.value === saved.description) {
+      merge(saved, { description: description.sequence });
       return;
     }
     const frame = await api.updateFrame(frameId, {

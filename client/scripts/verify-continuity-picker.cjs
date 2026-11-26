@@ -64,7 +64,7 @@ async function fixture(browser, options = {}) {
     const target = { ...rows[1], continuityEnabled: options.enabled !== false, concepts: [], generations: [] };
     if (options.enabled === undefined)
         delete target.continuityEnabled;
-    const state = { rows, target, requests: [], dispatches: 0, captures: [], listGate: null, listFailure: false, failNextPatch: false, failPreflight: false, deleteCount: 0, conceptList: [], nextPatchGate: null };
+    const state = { rows, target, requests: [], dispatches: 0, captures: [], listGate: null, listFailure: false, invalidSources: new Set(), closeGateBeforeCapture: false, failNextPatch: false, failPreflight: false, deleteCount: 0, conceptList: [], nextPatchGate: null };
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
     await page.addInitScript(() => localStorage.setItem('storyboards.session', 'fixture-token'));
@@ -107,7 +107,13 @@ async function fixture(browser, options = {}) {
                 hold.seen?.();
                 await hold.promise;
             }
-            if (state.failNextPatch) {
+            if (state.invalidSources.has(payload.continuitySourceFrameId)) {
+                status = 422;
+                body = { error: { code: 'invalid_continuity_source', message: 'Choose another frame in this story.' } };
+            } else if (payload.continuitySourceFrameId && state.target.continuityEnabled !== true) {
+                status = 422;
+                body = { error: { code: 'continuity_unavailable', message: 'Continuity unavailable.' } };
+            } else if (state.failNextPatch) {
                 state.failNextPatch = false;
                 status = 503;
                 body = { error: { code: 'fixture_failure', message: 'Could not save source. Try again.' } };
@@ -127,7 +133,13 @@ async function fixture(browser, options = {}) {
         }
         else if (path === `/api/frames/${ids.target}/generate` && method === 'POST') {
             state.captures.push({ description: state.target.description, source: state.target.continuitySourceFrameId, body: payload });
-            if (state.failPreflight) {
+            if (state.closeGateBeforeCapture) {
+                state.closeGateBeforeCapture = false;
+                state.target.continuitySourceFrameId = ids.later;
+                state.target.continuityEnabled = false;
+                status = 409;
+                body = { error: { code: 'continuity_configuration_changed', message: 'The source frame changed.' } };
+            } else if (state.failPreflight) {
                 state.failPreflight = false;
                 status = 503;
                 body = { error: { code: 'reference_storage_unavailable', message: 'Reference storage is temporarily unavailable. Try again.' } };
@@ -202,6 +214,76 @@ async function main() {
             assert.equal(state.captures[0].description, 'Generate this dirty scene');
             assert.equal(state.captures[0].source, ids.later);
             assert.equal(state.captures[0].body.expectedContinuitySourceFrameId, ids.later);
+            await f.close();
+        });
+        for (const scenario of ['generate after save', 'generate while queued', 'latest save fails']) {
+            await run(`obsolete source failure: ${scenario}`, async () => {
+                const f = await fixture(browser, { enabled: true });
+                const { page, state } = f;
+                await f.open();
+                const first = radio(page, /Frame 1.*Earlier/i);
+                const second = radio(page, /Frame 3.*Later/i);
+                await first.waitFor();
+                const hold = gate();
+                state.nextPatchGate = hold;
+                state.invalidSources.add(ids.earlier);
+                if (scenario === 'latest save fails') state.invalidSources.add(ids.later);
+                await first.check();
+                await eventually(() => state.requests.some(r => r.method === 'PATCH'), 'first save never started');
+                await second.check();
+                if (scenario !== 'generate after save') await generate(page).click();
+                assert.equal(state.captures.length, 0);
+                hold.release();
+
+                const review = page.getByText('Review the source before generating.', { exact: false });
+                if (scenario === 'latest save fails') {
+                    await review.waitFor();
+                    await page.getByText(`Intended source: ${ids.later}`, { exact: false }).waitFor();
+                    assert.equal(await generate(page).isDisabled(), true);
+                    assert.equal(state.captures.length, 0);
+                    assert.equal(state.dispatches, 0);
+                } else {
+                    await eventually(() => state.target.continuitySourceFrameId === ids.later, 'latest choice was not saved');
+                    if (scenario === 'generate after save') {
+                        await page.getByText('Saved', { exact: true }).waitFor();
+                        assert.equal(await review.count(), 0);
+                        assert.equal(state.captures.length, 0);
+                        await generate(page).click();
+                    }
+                    await eventually(() => state.dispatches === 1, 'explicit generation did not use the saved choice');
+                    assert.equal(await second.isChecked(), true);
+                    assert.equal(await review.count(), 0);
+                    assert.equal(state.captures.length, 1);
+                    assert.equal(state.captures[0].source, ids.later);
+                    assert.equal(state.captures[0].body.expectedContinuitySourceFrameId, ids.later);
+                }
+                await f.close();
+            });
+        }
+        await run('source conflict after gate closure allows explicit clear and later generation', async () => {
+            const f = await fixture(browser, { enabled: true });
+            const { page, state } = f;
+            state.target.continuitySourceFrameId = ids.earlier;
+            state.closeGateBeforeCapture = true;
+            await f.open();
+            await radio(page, /Frame 1.*Earlier/i).waitFor();
+            await scene(page).fill('Preserve this scene when clearing the source');
+            await generate(page).click();
+            await page.getByText(`Current source: ${ids.later}`, { exact: false }).waitFor();
+            assert.equal(state.captures.length, 1);
+            assert.equal(state.dispatches, 0);
+            assert.equal(await generate(page).isDisabled(), true);
+            await page.getByRole('button', { name: 'Clear source and save scene' }).click();
+            await eventually(async () => state.target.continuitySourceFrameId === null && await generate(page).isEnabled(), 'clear did not resolve review');
+            assert.equal(state.target.description, 'Preserve this scene when clearing the source');
+            assert.equal(await scene(page).inputValue(), state.target.description);
+            assert.equal(state.captures.length, 1);
+            assert.equal(state.dispatches, 0);
+            await generate(page).click();
+            await eventually(() => state.dispatches === 1, 'manual no-source generation did not start');
+            assert.equal(state.captures.length, 2);
+            assert.equal(state.captures[1].body.expectedContinuitySourceFrameId, null);
+            assert.equal(state.captures[1].description, state.target.description);
             await f.close();
         });
         await run('focus/manual refresh reorders labels and ignores stale response', async () => {
