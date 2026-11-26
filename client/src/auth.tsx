@@ -1,7 +1,8 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import type { UserDto } from "@storyboards/shared";
-import { api, clearToken, getToken, setToken, setUnauthorizedHandler } from "./api.js";
+import { api, clearToken, getToken, setToken, setUnauthorizedHandler, TOKEN_KEY } from "./api.js";
+import { clearAccountRequests } from "./generationRequests.js";
 
 interface AuthValue {
   user: UserDto | null;
@@ -18,27 +19,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUserState] = useState<UserDto | null>(null);
   const [loading, setLoading] = useState(() => getToken() !== null);
   const navigate = useNavigate();
+  const account = useRef<string | null>(null);
 
   const signIn = useCallback((token: string, next: UserDto) => {
+    if (account.current && account.current !== next.id) clearAccountRequests(account.current);
+    account.current = next.id;
     setToken(token);
+    setLoading(false);
     setUserState(next);
   }, []);
 
   const signOut = useCallback(async () => {
     // Best effort: the server deletes the session row so the token cannot be
     // replayed. Even if the call fails, drop it locally.
+    const previous = account.current;
+    if (previous) clearAccountRequests(previous);
+    const logout = api.logout();
+    clearToken();
+    account.current = null;
+    setUserState(null);
+    navigate("/login", { replace: true });
     try {
-      await api.logout();
+      await logout;
     } catch {
       /* already invalid, or offline */
     }
-    clearToken();
-    setUserState(null);
-    navigate("/login", { replace: true });
   }, [navigate]);
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
+      if (account.current) clearAccountRequests(account.current);
+      account.current = null;
       setUserState(null);
       navigate("/login", { replace: true });
     });
@@ -47,21 +58,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Rehydrate from a stored token on load, which also detects a session that
   // was revoked or expired while the tab was closed.
   useEffect(() => {
-    if (!getToken()) return;
-    let cancelled = false;
-    api
-      .getMe()
-      .then((me) => {
-        if (!cancelled) setUserState(me);
-      })
-      .catch(() => {
-        if (!cancelled) clearToken();
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    let epoch = 0;
+    async function rehydrate() {
+      const sequence = ++epoch;
+      const token = getToken();
+      setLoading(Boolean(token));
+      if (!token) return;
+      try {
+        const me = await api.getMe();
+        if (sequence === epoch && token === getToken()) {
+          account.current = me.id;
+          setUserState(me);
+        }
+      } catch {
+        if (sequence === epoch && token === getToken()) clearToken();
+      } finally {
+        if (sequence === epoch) setLoading(false);
+      }
+    }
+    function sessionChanged(event: StorageEvent) {
+      if (event.storageArea !== localStorage || (event.key !== null && event.key !== TOKEN_KEY)) return;
+      if (account.current) clearAccountRequests(account.current);
+      account.current = null;
+      setUserState(null);
+      void rehydrate();
+    }
+    void rehydrate();
+    window.addEventListener("storage", sessionChanged);
     return () => {
-      cancelled = true;
+      epoch++;
+      window.removeEventListener("storage", sessionChanged);
     };
   }, []);
 

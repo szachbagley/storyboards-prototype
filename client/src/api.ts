@@ -8,10 +8,11 @@ import type {
   GenerationSummaryDto,
   StoryDto,
   UserDto,
+  UpdateFrameBody,
 } from "@storyboards/shared";
 
 const BASE = import.meta.env.VITE_API_BASE_URL;
-const TOKEN_KEY = "storyboards.session";
+export const TOKEN_KEY = "storyboards.session";
 
 /** Mirrors the ApiErrorBody shape every non-2xx response has carried since phase 1. */
 export class ApiError extends Error {
@@ -48,8 +49,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // screen. Handled once here so no view has to remember -- and it now covers
   // an expired or revoked session as well as a wrong credential.
   if (res.status === 401) {
-    clearToken();
-    onUnauthorized?.();
+    if (token && token === getToken()) {
+      clearToken();
+      onUnauthorized?.();
+    }
     throw new ApiError(401, "unauthorized", "Your session is no longer valid. Sign in again.");
   }
 
@@ -118,14 +121,17 @@ export const api = {
   createFrame: (storyId: string, body: { description?: string }) =>
     send<FrameDto>(`/stories/${storyId}/frames`, "POST", body),
   getFrame: (id: string) => request<FrameDto>(`/frames/${id}`),
-  updateFrame: (id: string, body: { description?: string; conceptIds?: string[]; position?: number }) =>
+  updateFrame: (id: string, body: UpdateFrameBody) =>
     send<FrameDto>(`/frames/${id}`, "PATCH", body),
   deleteFrame: (id: string, referenceSetToken?: string) =>
     send<void>(`/frames/${id}${referenceSetToken === undefined ? "" : `?confirmContinuity=true&referenceSetToken=${encodeURIComponent(referenceSetToken)}`}`, "DELETE"),
 
   // --- generation ---
-  generateFrame: (frameId: string) => send<{ generationId: string }>(`/frames/${frameId}/generate`, "POST"),
-  getGeneration: (id: string) => request<GenerationSummaryDto>(`/generations/${id}`),
+  generateFrame: (frameId: string, requestId: string, expectedContinuitySourceFrameId: string | null) =>
+    send<{ generationId: string }>(`/frames/${frameId}/generate`, "POST", { requestId, expectedContinuitySourceFrameId }),
+  lookupGenerationRequest: (frameId: string, requestId: string) =>
+    request<{ generationId: string }>(`/frames/${frameId}/generation-requests/${requestId}`),
+  getGeneration: (id: string, signal?: AbortSignal) => request<GenerationSummaryDto>(`/generations/${id}`, { signal }),
   selectGeneration: (frameId: string, generationId: string) =>
     send<FrameDto>(`/frames/${frameId}/select-generation`, "POST", { generationId }),
 };

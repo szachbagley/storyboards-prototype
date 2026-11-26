@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   MAX_CHARACTER_CONCEPTS,
@@ -9,7 +9,10 @@ import {
 } from "@storyboards/shared";
 import { ApiError, api } from "../api.js";
 import { ConfirmButton } from "../components/ConfirmButton.js";
-import { useApi, useGenerationPolling } from "../hooks.js";
+import { useApi } from "../hooks.js";
+import { useAuth } from "../auth.js";
+import { useFrameEdits } from "../useFrameEdits.js";
+import { useFrameGeneration } from "../useFrameGeneration.js";
 
 // A client can outlive an API rollback. Omitted response fields carry no
 // evidence about the historical or current selection; explicit null does.
@@ -41,146 +44,166 @@ function continuityDescription(continuity: HistoryContinuity, frame: CurrentSele
   return used + " Current source selection differs; regenerate manually to use it.";
 }
 
+function RecoveredAttempt({ generation }: { generation: GenerationSummaryDto }) {
+  let source = "Recorded source unavailable.";
+  if (generation.continuity?.provenance === "known") {
+    const recorded = generation.continuity.source;
+    source = recorded
+      ? `Recorded source frame ${recorded.frameId}, image generation ${recorded.generationId}.`
+      : "This attempt used no continuity source.";
+  }
+  return <p role="status">Recovered generation {generation.status}. {source}</p>;
+}
+
 export function FrameEditor() {
   const { storyId = "", frameId = "" } = useParams();
+  const { user } = useAuth();
+  if (!user) return null;
+  return <FrameEditorSession key={JSON.stringify([user.id, storyId, frameId])}
+    userId={user.id} storyId={storyId} frameId={frameId} />;
+}
+
+function message(error: unknown) {
+  return error instanceof Error ? error.message : "Could not reach the server.";
+}
+
+function FrameEditorSession({ userId, storyId, frameId }: { userId: string; storyId: string; frameId: string }) {
   const navigate = useNavigate();
-  const frameState = useApi(() => api.getFrame(frameId), [frameId]);
+  const edits = useFrameEdits(frameId, storyId);
+  const { frame } = edits;
+  const attempt = useFrameGeneration(userId, frameId, frame, edits.reload);
   const conceptsState = useApi(() => api.listConcepts(), []);
-
-  const frame: FrameDto | null = frameState.data;
-  const [description, setDescription] = useState("");
-  const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const controlLock = useRef(false);
+  const admissionLock = useRef(false);
+  const [admitting, setAdmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [deleteReview, setDeleteReview] = useState<{ frameId: string; message: string; token: string; changed: boolean } | null>(null);
-  const [generationId, setGenerationId] = useState<string | null>(null);
+  const [reviewedFrame, setReviewedFrame] = useState<FrameDto | null>(null);
+  const [deleteReview, setDeleteReview] = useState<{ message: string; token: string; changed: boolean } | null>(null);
+  const [saved, setSaved] = useState(false);
+  if (!frame) return edits.readError
+    ? <div className="error-banner">{edits.readError}</div>
+    : <p className="muted">Loading…</p>;
 
-  const { generation, elapsedSeconds, timedOut } = useGenerationPolling(generationId);
+  const description = edits.description.value;
+  const attached = frame.concepts;
+  const attachedIds = new Set(attached.map(c => c.id));
+  const available = (conceptsState.data ?? []).filter(c => !attachedIds.has(c.id));
+  const characterCount = attached.filter(c => c.type === "character").length;
+  const recoveryOnly = attempt.canCheck && !attempt.canResubmit;
+  const cannotGenerate = admitting || busy === "delete" || !!reviewedFrame || attempt.running ||
+    attempt.checking || attempt.submitting || recoveryOnly || !description.trim();
+  const controlsDisabled = admitting || busy !== null;
+  const isGenerating = attempt.running && !attempt.timedOut;
+  const failed = attempt.generation?.status === "failed" ? attempt.generation : null;
 
-  useEffect(() => {
-    setDeleteReview(null);
-    setActionError(null);
-  }, [frameId]);
-
-  useEffect(() => {
-    if (frame) setDescription(frame.description);
-  }, [frame]);
-
-  /**
-   * Resume an in-flight generation on mount. Generation history is newest
-   * first, so a pending newest generation means one is still running -- without
-   * this a reload mid-generation would show idle while the work completed
-   * invisibly, and pressing Generate again would only return 409.
-   */
-  useEffect(() => {
-    if (!frame || generationId) return;
-    const newest = frame.generations[0];
-    if (newest?.status === "pending") setGenerationId(newest.id);
-  }, [frame, generationId]);
-
-  // A finished generation means the frame's image and history have changed.
-  useEffect(() => {
-    if (generation && generation.status !== "pending") frameState.reload();
-    // Keyed on status alone: reloading whenever the generation object identity
-    // changes would refetch on every poll tick.
-  }, [generation?.status]);
-
-  const attached = frame?.concepts ?? [];
-  const attachedIds = useMemo(() => new Set(attached.map((c) => c.id)), [attached]);
-  const available = (conceptsState.data ?? []).filter((c) => !attachedIds.has(c.id));
-  const characterCount = attached.filter((c) => c.type === "character").length;
-
-  if (frameState.loading && !frame) return <p className="muted">Loading…</p>;
-  if (!frame) return <div className="error-banner">{frameState.error ?? "Not found"}</div>;
-
-  async function saveDescription(next: string): Promise<void> {
-    if (!frame || next === frame.description) return;
-    await api.updateFrame(frame.id, { description: next });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1600);
-    frameState.reload();
+  function reportSaveError(error: unknown, intent: typeof edits.latest.current) {
+    if (!edits.current()) return;
+    if (error instanceof ApiError && (error.code === "continuity_configuration_changed" ||
+        error.code === "invalid_continuity_source")) {
+      setReviewedFrame(edits.latest.current.frame);
+      edits.preserveIntent(intent);
+    }
+    setActionError(message(error));
   }
 
-  async function setConcepts(ids: string[]) {
-    if (!frame) return;
-    setBusy("concepts");
+  function saveOnBlur() {
+    const intent = edits.latest.current;
+    if (admissionLock.current || reviewedFrame || !intent.description.dirty) return;
+    setActionError(null);
+    void edits.enqueue(async () => {
+      await edits.save(intent, false);
+      if (edits.current()) setSaved(true);
+    }).catch(error => reportSaveError(error, intent));
+  }
+
+  async function onGenerate() {
+    if (!edits.current() || admissionLock.current || cannotGenerate) return;
+    const intent = edits.latest.current;
+    admissionLock.current = true;
+    setAdmitting(true);
     setActionError(null);
     try {
-      await api.updateFrame(frame.id, { conceptIds: ids });
-      frameState.reload();
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : String(err));
+      await edits.enqueue(async () => {
+        await edits.save(intent, true);
+        if (!edits.current()) return;
+        setSaved(true);
+        await attempt.submit(intent.source.value);
+      }, true);
+    } catch (error) {
+      reportSaveError(error, intent);
     } finally {
-      setBusy(null);
+      admissionLock.current = false;
+      if (edits.current()) setAdmitting(false);
     }
   }
 
-  const attach = (concept: ConceptDto) => setConcepts([...attached.map((c) => c.id), concept.id]);
-  const detach = (id: string) => setConcepts(attached.filter((c) => c.id !== id).map((c) => c.id));
+  async function mutate(kind: string, work: () => Promise<void>) {
+    if (!edits.current() || controlLock.current || admissionLock.current) return;
+    controlLock.current = true;
+    setBusy(kind);
+    setActionError(null);
+    try {
+      await edits.enqueue(work);
+    } catch (error) {
+      if (edits.current()) setActionError(message(error));
+    } finally {
+      controlLock.current = false;
+      if (edits.current()) setBusy(null);
+    }
+  }
+
+  function resolveConflict(takeCurrent: boolean) {
+    if (!frame || frame === reviewedFrame || controlsDisabled) return;
+    const choice = takeCurrent ? frame.continuitySourceFrameId ?? null : edits.latest.current.source.value;
+    edits.edit("source", choice);
+    const intent = edits.latest.current;
+    void mutate("review", async () => {
+      try {
+        await edits.save(intent, true);
+        if (edits.current()) {
+          setReviewedFrame(null);
+          setSaved(true);
+        }
+      } catch (error) {
+        reportSaveError(error, intent);
+      }
+    });
+  }
+
+  function setConcepts(ids: string[]) {
+    return mutate("concepts", async () => { edits.merge(await api.updateFrame(frameId, { conceptIds: ids })); });
+  }
+  const attach = (concept: ConceptDto) => setConcepts([...attached.map(c => c.id), concept.id]);
+  const detach = (id: string) => setConcepts(attached.filter(c => c.id !== id).map(c => c.id));
   const reorder = (index: number, delta: number) => {
-    const ids = attached.map((c) => c.id);
+    const ids = attached.map(c => c.id);
     const next = index + delta;
     if (next < 0 || next >= ids.length) return;
     [ids[index], ids[next]] = [ids[next]!, ids[index]!];
     return setConcepts(ids);
   };
+  const onSelect = (id: string) => mutate("select", async () => {
+    edits.merge(await api.selectGeneration(frameId, id));
+  });
 
-  async function onGenerate() {
-    if (!frame) return;
-    setBusy("generate");
-    setActionError(null);
+  const onDelete = (token?: string) => mutate("delete", async () => {
     try {
-      // Descriptions autosave on blur, but generating straight after typing must
-      // not use a stale one -- and this is the operation that costs money.
-      await saveDescription(description);
-      const { generationId: id } = await api.generateFrame(frame.id);
-      setGenerationId(id);
+      await api.deleteFrame(frameId, token);
+      if (edits.current()) navigate(`/stories/${storyId}`, { replace: true });
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : String(err));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function onSelect(id: string) {
-    if (!frame) return;
-    setBusy("select");
-    try {
-      await api.selectGeneration(frame.id, id);
-      frameState.reload();
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : String(err));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function onDelete(token?: string) {
-    if (!frame || frame.id !== frameId) return;
-    setBusy("delete");
-    try {
-      setActionError(null);
-      await api.deleteFrame(frame.id, token);
-      navigate(`/stories/${storyId}`, { replace: true });
-    } catch (err) {
+      if (!edits.current()) return;
       if (err instanceof ApiError && err.status === 409 && err.code === "continuity_source_in_use" &&
           typeof err.details === "object" && err.details !== null &&
           "referencedByCount" in err.details && typeof err.details.referencedByCount === "number" &&
           "referenceSetToken" in err.details && typeof err.details.referenceSetToken === "string") {
-        setDeleteReview({
-          frameId: frame.id, message: err.message, token: err.details.referenceSetToken,
-          changed: token !== undefined,
-        });
+        setDeleteReview({ message: err.message, token: err.details.referenceSetToken, changed: token !== undefined });
       } else {
-        setActionError(err instanceof ApiError ? err.message : String(err));
+        throw err;
       }
-      setBusy(null);
     }
-  }
+  });
 
-  // TECH_SPEC.md section 12.3: four distinct states.
-  const isGenerating = generation?.status === "pending" || (generationId !== null && !generation && !timedOut);
-  const failed = generation?.status === "failed" ? generation : null;
   const displayed = frame.generations.find((g) => g.id === frame.selectedGenerationId) ?? null;
 
   return (
@@ -190,26 +213,43 @@ export function FrameEditor() {
           <Link to={`/stories/${storyId}`} className="back" aria-label="Back to story">‹</Link>
           <h1>Frame</h1>
         </div>
-        {deleteReview?.frameId === frameId ? (
+        {deleteReview ? (
           <div>
             {deleteReview.changed && <p>The frames using this source have changed. Review the updated warning and confirm again.</p>}
             <p>{deleteReview.message}</p>
             <div className="row">
-              <button className="btn btn-danger" type="button" disabled={busy === "delete"} onClick={() => void onDelete(deleteReview.token)}>Confirm deletion</button>
-              <button className="btn" type="button" disabled={busy === "delete"} onClick={() => { setDeleteReview(null); setActionError(null); }}>Cancel</button>
+              <button className="btn btn-danger" type="button" disabled={controlsDisabled} onClick={() => void onDelete(deleteReview.token)}>Confirm deletion</button>
+              <button className="btn" type="button" disabled={controlsDisabled} onClick={() => { setDeleteReview(null); setActionError(null); }}>Cancel</button>
             </div>
           </div>
-        ) : <ConfirmButton key={frameId} label="Delete frame" confirmLabel="Delete frame permanently" busy={busy === "delete"} onConfirm={() => void onDelete()} />}
+        ) : <ConfirmButton key={frameId} label="Delete frame" confirmLabel="Delete frame permanently" busy={controlsDisabled} onConfirm={() => void onDelete()} />}
       </div>
 
       {actionError && <div className="error-banner">{actionError}</div>}
+
+      {edits.readError && <div className="error-banner">{edits.readError} <button className="btn" onClick={edits.reload}>Refresh frame</button></div>}
+      {reviewedFrame && <div className="error-banner">
+        <p>Review the source before generating. Your scene draft has been kept.</p>
+        {frame !== reviewedFrame && <>
+          <p>Intended source: {edits.source.value ?? "None"}. Current source: {frame.continuitySourceFrameId ?? "None"}.</p>
+          <button className="btn" disabled={controlsDisabled} onClick={() => resolveConflict(true)}>Use current source</button>
+          <button className="btn" disabled={controlsDisabled} onClick={() => resolveConflict(false)}>Keep intended source</button>
+        </>}
+      </div>}
+      {attempt.storageWarning && <p role="status">{attempt.storageWarning}</p>}
+      {attempt.notice && <p role="status">{attempt.notice}</p>}
+      {attempt.recovered && attempt.generation && <RecoveredAttempt generation={attempt.generation} />}
+      {attempt.timedOut && <p role="status">This generation may still finish. Check again for its latest status.</p>}
+      {attempt.canCheck && <button className="btn" disabled={attempt.checking || admitting} onClick={attempt.check}>
+        {attempt.timedOut ? "Check again" : "Check request"}
+      </button>}
 
       <div className="frame-layout">
         <div>
           {isGenerating ? (
             <div className="frame-placeholder">
               <div>
-                <p style={{ margin: 0, fontWeight: 600 }}>Generating… {elapsedSeconds}s</p>
+                <p style={{ margin: 0, fontWeight: 600 }}>Generating… {attempt.elapsedSeconds}s</p>
                 <p className="muted" style={{ marginBottom: 0 }}>10 to 40 seconds is normal.</p>
               </div>
             </div>
@@ -217,12 +257,6 @@ export function FrameEditor() {
             <img className="frame-image" src={displayed.imageUrl} alt="Generated frame" />
           ) : (
             <div className="frame-placeholder">Not generated yet</div>
-          )}
-
-          {timedOut && !failed && (
-            <div className="error-banner" style={{ marginTop: 12 }}>
-              This is taking longer than expected. It may still finish — reload to check.
-            </div>
           )}
 
           {failed && (
@@ -234,24 +268,25 @@ export function FrameEditor() {
               {failed.errorCode === "safety_blocked" && (
                 <p className="muted" style={{ color: "inherit" }}>Edit the description below and try again.</p>
               )}
-              <button className="btn" type="button" onClick={onGenerate} disabled={busy === "generate"}>Retry</button>
+              <button className="btn" type="button" onClick={onGenerate} disabled={cannotGenerate}>Retry</button>
             </div>
           )}
 
           <div className="spread" style={{ margin: "18px 0 8px" }}>
             <h2 style={{ margin: 0 }}>Scene description</h2>
-            {saved && <span className="saved">Saved</span>}
+            {saved && !edits.description.dirty && !edits.source.dirty && <span className="saved">Saved</span>}
           </div>
           <textarea
             value={description}
             aria-label="Frame description"
             placeholder="What happens in this frame — action, staging, camera, light, and any visual style. The attached concepts supply how the subjects look."
-            onChange={(e) => setDescription(e.target.value)}
-            onBlur={(e) => void saveDescription(e.target.value).catch(() => setActionError("Could not save the description."))}
+            disabled={admitting}
+            onChange={(e) => { edits.edit("description", e.target.value); setSaved(false); }}
+            onBlur={saveOnBlur}
           />
           <div className="row" style={{ marginTop: 10 }}>
-            <button className="btn btn-primary" type="button" disabled={busy === "generate" || isGenerating || !description.trim()} onClick={onGenerate}>
-              {isGenerating ? "Generating…" : "Generate frame"}
+            <button className="btn btn-primary" type="button" disabled={cannotGenerate} onClick={onGenerate}>
+              {attempt.canResubmit ? "Resubmit request" : isGenerating ? "Generating…" : "Generate frame"}
             </button>
             {!description.trim() && <span className="muted">A description is required.</span>}
           </div>
@@ -265,7 +300,7 @@ export function FrameEditor() {
                     <button
                       type="button"
                       className={`history-item${g.id === frame.selectedGenerationId ? " history-selected" : ""}`}
-                      disabled={busy === "select" || g.status !== "succeeded"}
+                      disabled={controlsDisabled || g.status !== "succeeded"}
                       title={g.status === "succeeded" ? "Use this generation" : (g.errorCode ?? g.status)}
                       onClick={() => void onSelect(g.id)}
                     >
@@ -311,9 +346,9 @@ export function FrameEditor() {
                     {concept.name} <span className="muted">{concept.type}</span>
                     {!concept.imageUrl && <span className="warn"> · no reference image</span>}
                   </span>
-                  <button className="btn btn-small" type="button" aria-label={`Move ${concept.name} up`} disabled={busy !== null || index === 0} onClick={() => void reorder(index, -1)}>↑</button>
-                  <button className="btn btn-small" type="button" aria-label={`Move ${concept.name} down`} disabled={busy !== null || index === attached.length - 1} onClick={() => void reorder(index, 1)}>↓</button>
-                  <button className="btn btn-small" type="button" aria-label={`Remove ${concept.name}`} disabled={busy !== null} onClick={() => void detach(concept.id)}>×</button>
+                  <button className="btn btn-small" type="button" aria-label={`Move ${concept.name} up`} disabled={controlsDisabled || index === 0} onClick={() => void reorder(index, -1)}>↑</button>
+                  <button className="btn btn-small" type="button" aria-label={`Move ${concept.name} down`} disabled={controlsDisabled || index === attached.length - 1} onClick={() => void reorder(index, 1)}>↓</button>
+                  <button className="btn btn-small" type="button" aria-label={`Remove ${concept.name}`} disabled={controlsDisabled} onClick={() => void detach(concept.id)}>×</button>
                 </li>
               ))}
             </ul>
@@ -329,7 +364,7 @@ export function FrameEditor() {
                   <span className="picker-name">
                     {concept.name} <span className="muted">{concept.type}</span>
                   </span>
-                  <button className="btn btn-small" type="button" disabled={busy !== null} onClick={() => void attach(concept)}>Attach</button>
+                  <button className="btn btn-small" type="button" disabled={controlsDisabled} onClick={() => void attach(concept)}>Attach</button>
                 </li>
               ))}
             </ul>

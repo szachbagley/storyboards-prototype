@@ -66,57 +66,46 @@ export interface PollingState {
  * server's classified error arrives first and the user sees an actionable
  * message instead of a generic client-side timeout.
  */
-export function useGenerationPolling(generationId: string | null): PollingState {
-  const [generation, setGeneration] = useState<GenerationSummaryDto | null>(null);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [timedOut, setTimedOut] = useState(false);
+export function useGenerationPolling(frameId: string, generationId: string | null, round: number): PollingState {
+  const identity = JSON.stringify([frameId, generationId, round]);
+  const empty: PollingState = { generation: null, elapsedSeconds: 0, timedOut: false };
+  const [result, setResult] = useState({ identity, ...empty });
 
   useEffect(() => {
-    setGeneration(null);
-    setElapsedSeconds(0);
-    setTimedOut(false);
     if (!generationId) return;
-
-    const startedAt = Date.now();
-    let stopped = false;
-
+    const controller = new AbortController();
+    const started = Date.now();
+    let timer: ReturnType<typeof setTimeout>;
     const tick = setInterval(() => {
-      if (!stopped) setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+      setResult(previous => ({ ...previous, identity, elapsedSeconds: Math.floor((Date.now() - started) / 1000) }));
     }, 1000);
-
-    const poll = setInterval(() => {
-      if (stopped) return;
-      if (Date.now() - startedAt > CLIENT_POLL_CEILING_MS) {
-        stopped = true;
-        setTimedOut(true);
-        return;
-      }
-      void api
-        .getGeneration(generationId)
-        .then((next) => {
-          if (stopped) return;
-          setGeneration(next);
-          if (next.status !== "pending") stopped = true;
-        })
-        .catch(() => {
-          /* transient; the next tick retries */
-        });
-    }, POLL_INTERVAL_MS);
-
-    // Fetch once immediately so a already-finished generation resolves at once.
-    void api.getGeneration(generationId).then((next) => {
-      if (!stopped) {
-        setGeneration(next);
-        if (next.status !== "pending") stopped = true;
-      }
-    }).catch(() => {});
-
-    return () => {
-      stopped = true;
+    const stop = () => {
+      controller.abort();
+      clearTimeout(timer);
       clearInterval(tick);
-      clearInterval(poll);
+      clearTimeout(ceiling);
     };
-  }, [generationId]);
+    const ceiling = setTimeout(() => {
+      stop();
+      setResult(previous => ({ ...previous, identity, timedOut: true }));
+    }, CLIENT_POLL_CEILING_MS);
+    setResult({ identity, generation: null, elapsedSeconds: 0, timedOut: false });
+    async function poll(id: string) {
+      try {
+        const next = await api.getGeneration(id, controller.signal);
+        if (controller.signal.aborted) return;
+        if (next.id === id) {
+          setResult(previous => ({ ...previous, identity, generation: next }));
+          if (next.status !== "pending") { stop(); return; }
+        }
+      } catch {
+        // Transient read failures can be checked until the ceiling.
+      }
+      if (!controller.signal.aborted) timer = setTimeout(() => void poll(id), POLL_INTERVAL_MS);
+    }
+    void poll(generationId);
+    return stop;
+  }, [identity, generationId]);
 
-  return { generation, elapsedSeconds, timedOut };
+  return result.identity === identity ? result : empty;
 }
