@@ -104,7 +104,8 @@ export async function startGeneration(
 
   const candidateId = randomUUID();
   let ownsCopy = false;
-  let inserted = false;
+  let admissionTransactionId: string | undefined;
+  let confirmedRollback = false;
   let insertAttempted = false;
   let replayDuringAdmission: string | null = null;
   try {
@@ -158,11 +159,10 @@ export async function startGeneration(
       const pending = await generationsDb.getPendingForFrame(client, frameId, user.id);
       if (pending) throw pendingError(pending.id);
       insertAttempted = true;
-      await generationsDb.insertPending(client, {
+      admissionTransactionId = await generationsDb.insertPending(client, {
         id: candidateId, frameId, requestId: body.requestId ?? null,
         model: IMAGE_MODEL, compiledPrompt: prompt, inputSnapshot,
       });
-      inserted = true;
       return { id: candidateId, inserted: true };
     });
     if (!admission.inserted) return admission.id;
@@ -185,8 +185,13 @@ export async function startGeneration(
       throw new AppError(503, "admission_uncertain", "Generation was recorded but dispatch could not be confirmed.",
         { generationId: candidateId });
     }
-    if (inserted) throw new AppError(503, "admission_uncertain",
-      "Generation admission could not be confirmed. Check the frame before retrying.");
+    if (admissionTransactionId !== undefined) {
+      if (ownsCopy) {
+        confirmedRollback = await generationsDb.admissionRolledBack(admissionTransactionId).catch(() => false);
+      }
+      throw new AppError(503, "admission_uncertain",
+        "Generation admission could not be confirmed. Check the frame before retrying.");
+    }
     const constraint = admissionConflictName(err);
     if (constraint) {
       if (body.requestId) {
@@ -205,7 +210,7 @@ export async function startGeneration(
   } finally {
     // A lost COMMIT acknowledgement after INSERT may still leave a committed row.
     // An ambiguous PUT never established ownership of its key.
-    if (ownsCopy && !inserted) {
+    if (ownsCopy && (admissionTransactionId === undefined || confirmedRollback)) {
       await cleanupKnownUncommittedContinuityCopy(candidateId).catch(() =>
         console.error(`[generation] ${candidateId} could not clean up its staged input`));
     }

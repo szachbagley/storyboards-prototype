@@ -66,6 +66,7 @@ const { createApp } = await import("../dist/app.js");
 const { pool } = await import("../dist/db/pool.js");
 const { sweepStale } = await import("../dist/db/generations.js");
 let commitFault = null;
+let unavailableDisposition = false;
 let rollbackFault = false;
 let faultedClient = null;
 let recoveryReads = 0;
@@ -91,6 +92,12 @@ pg.Client.prototype.query = function (...args) {
       throw error;
     });
   }
+  if (unavailableDisposition && typeof args[0] === "string" && args[0].includes("pg_xact_status")) {
+    unavailableDisposition = false;
+    assert.notEqual(this, faultedClient);
+    // Preserve pg's promise/callback calling convention while forcing a real SQL error.
+    return originalPgQuery.call(this, "SELECT 1 / 0 WHERE $1::text IS NOT NULL", ...args.slice(1));
+  }
   if (args[0] === "ROLLBACK" && rollbackFault) {
     rollbackFault = false;
     return Promise.reject(new Error("fixture: rollback failed"));
@@ -105,6 +112,7 @@ pg.Client.prototype.query = function (...args) {
     commitFault = null;
     faultedClient = this;
     recoveryReads = 0;
+    if (fault === "unresolved") unavailableDisposition = true;
     if (fault === "rollback_failure") rollbackFault = true;
     if (fault !== "after") return Promise.reject(new Error("fixture: COMMIT not sent"));
     return Promise.resolve(originalPgQuery.apply(this, args)).then(() => {
@@ -412,7 +420,7 @@ try {
   if (continuityEnabled) {
     const { verifyContinuity } = await import("./verify-continuity-cases.mjs");
     await verifyContinuity({ db, state, request, a, b, storyA, other, gate, waitFor, status,
-      loseCommitAck: () => { commitFault = "after"; } });
+      injectAdmissionFault: (fault) => { commitFault = fault; } });
   }
   assert.equal(globalThis.__package1Outbound.blocked, 0);
   console.log(`offline app: stub dispatches generate=${state.calls.generate}, validate=${state.calls.validate}, describe=${state.calls.describe}; real outbound=0`);

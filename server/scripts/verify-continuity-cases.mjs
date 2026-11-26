@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
 
 export async function verifyContinuity({ db, state, request, a, b, storyA, other,
-  gate, waitFor, status, loseCommitAck }) {
+  gate, waitFor, status, injectAdmissionFault }) {
   const call = (method, path, body, code) => request(method, path, a.token, body, code);
   const frame = (description, story = storyA) =>
     call("POST", `/stories/${story.id}/frames`, { description }, 201);
@@ -158,11 +158,30 @@ export async function verifyContinuity({ db, state, request, a, b, storyA, other
   await waitFor(async () => (await status(failed)).status === "failed");
   assert.ok(state.objects.has(copyKey(failed)));
   const dispatches = state.calls.generate;
-  loseCommitAck();
-  const uncertain = await generate(target, { ...expected, requestId: randomUUID() }, 503);
+  const beforeFaultRows = await count(target);
+  for (const fault of ["before", "unresolved"]) {
+    const prior = copies().sort();
+    const { put, delete: deletes } = state.calls;
+    injectAdmissionFault(fault);
+    const response = await generate(target, { ...expected, requestId: randomUUID() }, 503);
+    assert.equal(response.error.code, "admission_uncertain");
+    assert.equal(await count(target), beforeFaultRows);
+    assert.equal(state.calls.generate, dispatches);
+    assert.equal(state.calls.put, put + 1);
+    assert.equal(state.calls.delete, deletes + (fault === "before" ? 1 : 0));
+    assert.deepEqual(copies().filter(k => prior.includes(k)).sort(), prior);
+    assert.equal(copies().length, prior.length + (fault === "unresolved" ? 1 : 0));
+  }
+  injectAdmissionFault("after");
+  const lostToken = randomUUID();
+  const uncertain = await generate(target, { ...expected, requestId: lostToken }, 503);
   assert.equal(uncertain.error.code, "admission_uncertain");
-  assert.ok(state.objects.has(copyKey(uncertain.error.details.generationId)));
+  const recorded = uncertain.error.details.generationId;
+  assert.equal((await status(recorded)).status, "pending");
+  assert.ok(state.objects.has(copyKey(recorded)));
+  assert.equal((await generate(target, { ...expected, requestId: lostToken })).generationId, recorded);
   assert.equal(state.calls.generate, dispatches);
+  console.log("continuity admission: proven rollback cleaned only its candidate; unresolved and committed copies preserved; no dispatch on recovery/replay");
   await call("DELETE", `/frames/${source.id}`, undefined, 204);
   const detail = await call("GET", `/frames/${target.id}`, undefined, 200);
   assert.equal(detail.continuitySourceFrameId, null);
