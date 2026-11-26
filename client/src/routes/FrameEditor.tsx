@@ -11,16 +11,28 @@ import { ApiError, api } from "../api.js";
 import { ConfirmButton } from "../components/ConfirmButton.js";
 import { useApi, useGenerationPolling } from "../hooks.js";
 
-function ContinuityNote({ continuity, frame }: { continuity: GenerationSummaryDto["continuity"]; frame: FrameDto }) {
+// A client can outlive an API rollback. Omitted response fields carry no
+// evidence about the historical or current selection; explicit null does.
+type HistoryContinuity = GenerationSummaryDto["continuity"] | null | undefined;
+type CurrentSelection = Partial<Pick<FrameDto,
+  "continuitySourceFrameId" | "continuitySourceSelectedGenerationId">>;
+
+function ContinuityNote({ continuity, frame }: { continuity: HistoryContinuity; frame: CurrentSelection }) {
   const description = continuityDescription(continuity, frame);
   return description && <p className="muted">{description}</p>;
 }
 
-function continuityDescription(continuity: GenerationSummaryDto["continuity"], frame: FrameDto): string | null {
+function continuityDescription(continuity: HistoryContinuity, frame: CurrentSelection): string | null {
+  if (continuity == null) return "Continuity provenance unavailable.";
   if (continuity.provenance !== "known") {
     return continuity.provenance === "legacy" ? "Continuity provenance unavailable for this legacy generation." : "Continuity provenance unknown.";
   }
   const source = continuity.source;
+  if (frame.continuitySourceFrameId === undefined || frame.continuitySourceSelectedGenerationId === undefined) {
+    return source?.sourceFrameDeleted
+      ? "Used deleted source frame. Current source selection unavailable."
+      : "Current source selection unavailable.";
+  }
   const differs = (source?.frameId ?? null) !== frame.continuitySourceFrameId ||
     (source?.generationId ?? null) !== frame.continuitySourceSelectedGenerationId;
   if (!differs) return source ? "Used current source selection." : null;
