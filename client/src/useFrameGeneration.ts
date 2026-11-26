@@ -6,6 +6,7 @@ import { readOutstanding, requestKey, writeOutstanding, type OutstandingRequest 
 
 const uncertain = "Submission could not be confirmed. Check request to see whether it was accepted.";
 const absent = "Request not accepted yet; no saved attempt found. Resubmitting uses the current saved inputs and source if no earlier attempt wins. The first accepted attempt determines the recorded inputs.";
+const waitingMessage = "Another generation is running on this frame. Your earlier request will be checked when it finishes.";
 const storageMessage = "Browser storage is unavailable. Reload cannot resolve an unknown submission in this tab.";
 type Recovery = "idle" | "checking" | "unknown" | "absent" | "submitting";
 
@@ -15,11 +16,11 @@ export function useFrameGeneration(userId: string, frameId: string, frame: Frame
   const key = requestKey(userId, frameId);
   const [{ value: initial, storageAvailable }] = useState(() => readOutstanding(key));
   const outstanding = useRef(initial);
-  const [generationId, setGenerationId] = useState(initial?.generationId ?? null);
+  const [generationId, setGenerationId] = useState(initial?.generationId ?? initial?.waitingForGenerationId ?? null);
   const [recovered, setRecovered] = useState(Boolean(initial?.generationId));
   const [round, setRound] = useState(0);
-  const [mode, setMode] = useState<Recovery>(initial?.requestId && !initial.generationId ? "unknown" : "idle");
-  const [notice, setNotice] = useState<string | null>(null);
+  const [mode, setMode] = useState<Recovery>(initial?.requestId && !initial.generationId && !initial.waitingForGenerationId ? "unknown" : "idle");
+  const [notice, setNotice] = useState<string | null>(initial?.waitingForGenerationId ? waitingMessage : null);
   const [storageWarning, setStorageWarning] = useState<string | null>(storageAvailable ? null : storageMessage);
   const lock = useRef(false);
   const terminalIds = useRef(new Set<string>());
@@ -50,10 +51,22 @@ export function useFrameGeneration(userId: string, frameId: string, frame: Frame
     setNotice(null);
   };
 
+  function observePending(id: string, unresolvedRequest: string | null) {
+    if (!unresolvedRequest) {
+      resume(id, null);
+      return;
+    }
+    record({ requestId: unresolvedRequest, generationId: null, waitingForGenerationId: id });
+    setGenerationId(id);
+    setRecovered(false);
+    setMode("idle");
+    setNotice(waitingMessage);
+  }
+
   async function lookup() {
     const pending = outstanding.current;
     const seq = mounted.current;
-    if (!pending?.requestId || pending.generationId || lock.current || !current(seq)) return;
+    if (!pending?.requestId || pending.generationId || pending.waitingForGenerationId || lock.current || !current(seq)) return;
     lock.current = true;
     setMode("checking");
     setNotice(null);
@@ -62,7 +75,10 @@ export function useFrameGeneration(userId: string, frameId: string, frame: Frame
       if (current(seq)) resume(result.generationId, pending.requestId);
     } catch (error) {
       if (!current(seq)) return;
-      if (error instanceof ApiError && error.status === 404) {
+      // Older APIs also return 404 not_found for an unimplemented lookup route
+      // and can ignore requestId on POST. Only the shipped lookup reply proves absence.
+      if (error instanceof ApiError && error.status === 404 && error.code === "not_found" &&
+          error.message === "No generation request for this frame.") {
         setMode("absent");
         setNotice(absent);
       } else {
@@ -75,17 +91,27 @@ export function useFrameGeneration(userId: string, frameId: string, frame: Frame
   }
 
   useEffect(() => {
-    if (matchingFrame && initial?.requestId && !initial.generationId) void lookup();
+    if (matchingFrame && initial?.requestId && !initial.generationId && !initial.waitingForGenerationId) void lookup();
     // Only the first matching frame triggers automatic lookup. All recovery uses GET.
   }, [matchingFrame, initial]);
 
   useLayoutEffect(() => {
     const id = polling.generation?.id;
-    if (!id || polling.generation?.status === "pending" || terminalIds.current.has(id)) return;
-    if (!current(mounted.current)) return;
-    terminalIds.current.add(id);
-    if (outstanding.current?.generationId === id) record(null);
-    terminal.current();
+    if (!id || polling.generation?.status === "pending" || !current(mounted.current)) return;
+    if (!terminalIds.current.has(id)) {
+      terminalIds.current.add(id);
+      terminal.current();
+    }
+    const pending = outstanding.current;
+    if (pending?.waitingForGenerationId === id && pending.requestId) {
+      // Finishing the other work says nothing about the original submission.
+      record({ requestId: pending.requestId, generationId: null });
+      setGenerationId(null);
+      setMode("unknown");
+      void lookup();
+    } else if (pending?.generationId === id) {
+      record(null);
+    }
   }, [polling.generation]);
 
   useLayoutEffect(() => {
@@ -97,7 +123,7 @@ export function useFrameGeneration(userId: string, frameId: string, frame: Frame
   async function submit(source: string | null) {
     const seq = mounted.current;
     const previous = outstanding.current;
-    if (!current(seq) || !matchingFrame || lock.current || previous?.generationId ||
+    if (!current(seq) || !matchingFrame || lock.current || previous?.generationId || previous?.waitingForGenerationId ||
         (previous?.requestId && mode !== "absent")) return;
     lock.current = true;
     try {
@@ -116,13 +142,14 @@ export function useFrameGeneration(userId: string, frameId: string, frame: Frame
           (error.code === "admission_uncertain" && error.status === 503));
         if (recorded && typeof error.details === "object" && error.details !== null && "generationId" in error.details &&
             typeof error.details.generationId === "string") {
-          resume(error.details.generationId, error.code === "admission_uncertain" ? requestId : null);
+          if (error.code === "admission_uncertain") resume(error.details.generationId, requestId);
+          else observePending(error.details.generationId, previous?.requestId ?? null);
         } else if (recorded && error.code === "generation_in_progress") {
           // An older server omits the pending ID. Read owned frame history once.
           const latest = await api.getFrame(frameId).catch(() => null);
           if (!current(seq)) return;
           const pending = latest?.id === frameId ? latest.generations.find(row => row.status === "pending") : null;
-          if (pending) resume(pending.id, null);
+          if (pending) observePending(pending.id, previous?.requestId ?? null);
           else {
             setMode("unknown");
             setNotice("Another generation was running. Check request before resubmitting.");

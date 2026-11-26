@@ -24,26 +24,34 @@ const spa = (page, id) => page.evaluate(path => {
 }, `/stories/story/frames/${id}`);
 const sourceA = '11111111-1111-4111-8111-111111111111';
 const sourceB = '22222222-2222-4222-8222-222222222222';
+const otherGenerationId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 const frame = (id = 'a') => ({ id, storyId: 'story', position: 1, description: 'Original scene',
   continuitySourceFrameId: null, continuitySourceSelectedGenerationId: null, continuityReferencedByCount: 0,
   selectedImageState: 'none', selectedGenerationId: null, imageUrl: null, concepts: [], generations: [] });
 const generation = (id, status = 'pending') => ({ id, status, imageUrl: null, errorCode: null,
   errorMessage: null, continuity: { provenance: 'known', source: null }, createdAt: '2026-01-01T00:00:00Z', completedAt: null });
 
-async function fixture(browser, { unavailableStorage = false } = {}) {
+async function fixture(browser, { unavailableStorage = false, denyStorageWrites = false } = {}) {
   const context = await browser.newContext({ serviceWorkers: 'block' });
   const page = await context.newPage();
   const errors = [], requests = [], captures = [], frames = { a: frame('a'), b: frame('b') }, lookup = new Map();
   const state = { frames, requests, captures, lookup, concepts: [], account: 'account-a', postMode: 'accept', pollStatus: 'pending',
     failNextPatch: false, dispatches: 0, nextGetGate: null, nextPatchGate: null, nextPollGate: null, counter: 0 };
   page.on('pageerror', e => errors.push(e.message));
-  await page.addInitScript(({ unavailable }) => {
+  await page.addInitScript(({ unavailable, denyWrites }) => {
     if (!sessionStorage.getItem('fixture.initialized')) {
       localStorage.setItem('storyboards.session', 'fixture-a');
       sessionStorage.setItem('fixture.initialized', 'yes');
     }
     if (unavailable) Object.defineProperty(window, 'sessionStorage', { get() { throw new DOMException('blocked', 'SecurityError'); } });
-  }, { unavailable: unavailableStorage });
+    if (denyWrites) {
+      const write = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key, value) {
+        if (this === sessionStorage) throw new DOMException('quota', 'QuotaExceededError');
+        return write.call(this, key, value);
+      };
+    }
+  }, { unavailable: unavailableStorage, denyWrites: denyStorageWrites });
   await page.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url()), method = request.method();
     if (url.origin === origin && !url.pathname.startsWith('/api/')) return route.continue();
@@ -93,10 +101,15 @@ async function fixture(browser, { unavailableStorage = false } = {}) {
       }
     } else if (/\/generation-requests\//.test(path)) {
       const id = path.split('/').pop();
+      if (state.nextLookupGate) {
+        const hold = state.nextLookupGate;
+        state.nextLookupGate = null;
+        await hold.promise;
+      }
       if (lookup.has(id)) body = { generationId: lookup.get(id) };
       else {
         status = 404;
-        body = { error: { code: 'not_found', message: 'Not found' } };
+        body = { error: { code: 'not_found', message: state.missingLookupRoute ? `No route for GET ${path}` : 'No generation request for this frame.' } };
       }
     } else if (/\/generate$/.test(path) && method === 'POST') {
       const id = path.split('/')[3];
@@ -112,9 +125,11 @@ async function fixture(browser, { unavailableStorage = false } = {}) {
         status = 409;
         body = { error: { code: 'continuity_configuration_changed', message: 'The source frame changed. Refresh and review it.' } };
       }
-      else if (state.postMode === 'pending409') {
+      else if (state.postMode === 'pending409' || state.postMode === 'pending409-no-id') {
         status = 409;
-        body = { error: { code: 'generation_in_progress', message: 'Already running', details: { generationId: 'existing' } } };
+        frames[id].generations.unshift(generation(otherGenerationId));
+        body = { error: { code: 'generation_in_progress', message: 'Already running' } };
+        if (state.postMode === 'pending409') body.error.details = { generationId: otherGenerationId };
       }
       else {
         const gen = `aaaaaaaa-aaaa-4aaa-8aaa-${String(++state.counter).padStart(12, '0')}`;
@@ -456,8 +471,110 @@ async function main() {
       state.postMode = 'pending409';
       await f.open('a');
       await clickGenerate(page);
-      await eventually(() => state.requests.some(r => r.path === '/api/generations/existing'), 'existing generation not polled');
+      await eventually(() => state.requests.some(r => r.path === `/api/generations/${otherGenerationId}`), 'existing generation not polled');
       assert.equal(state.captures.length, 1);
+      await f.close();
+    });
+    for (const conflict of ['pending409', 'pending409-no-id']) {
+      await run(`ambiguous UUID survives ${conflict}, navigation, and the other generation finishing`, async () => {
+        const f = await fixture(browser);
+        const { page, state } = f;
+        const check = page.getByRole('button', { name: 'Check request', exact: true });
+        const resubmit = page.getByRole('button', { name: 'Resubmit request', exact: true });
+        state.postMode = 'lost-never';
+        await f.open('a');
+        await clickGenerate(page);
+        await check.waitFor();
+        const original = state.captures[0].body.requestId;
+        const lookups = () => state.requests.filter(r => r.path.endsWith('/generation-requests/' + original));
+        await check.click();
+        await resubmit.waitFor();
+        state.postMode = conflict;
+        await resubmit.click();
+        const pollingOther = () => state.requests.filter(r => r.path === '/api/generations/' + otherGenerationId);
+        await eventually(() => pollingOther().length > 0, 'competing generation was not polled');
+        const beforeRemount = pollingOther().length;
+        if (conflict === 'pending409') {
+          await spa(page, 'b');
+          await generate(page).waitFor();
+          await spa(page, 'a');
+        } else {
+          await page.reload();
+        }
+        await eventually(() => pollingOther().length > beforeRemount, 'poll was not resumed after remount');
+        const beforeTerminal = lookups().length;
+        const holdLookup = gate();
+        state.nextLookupGate = holdLookup;
+        state.pollStatus = 'succeeded';
+        await eventually(() => lookups().length > beforeTerminal, 'terminal poll did not look up the original UUID');
+        assert.equal(await generate(page).isDisabled(), true);
+        assert.equal(await resubmit.count(), 0);
+        holdLookup.release();
+        await resubmit.waitFor();
+        assert.ok(lookups().every(r => r.method === 'GET'));
+        assert.deepEqual(state.captures.map(c => c.body.requestId), [original, original]);
+        assert.equal(state.dispatches, 0);
+
+        // Simulate the original POST winning admission now that the frame is idle.
+        const admitted = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+        state.lookup.set(original, admitted);
+        state.frames.a.generations.unshift(generation(admitted, 'succeeded'));
+        state.dispatches++;
+        if (conflict === 'pending409') await check.click();
+        else await resubmit.click();
+        await eventually(() => state.requests.some(r => r.path === '/api/generations/' + admitted), 'original attempt was not recovered');
+        await page.getByText('Recovered generation succeeded. This attempt used no continuity source.').waitFor();
+        assert.ok(state.captures.every(c => c.body.requestId === original), 'a fresh request UUID was sent');
+        assert.equal(state.captures.length, conflict === 'pending409' ? 2 : 3);
+        assert.equal(state.dispatches, 1);
+        await f.close();
+      });
+    }
+    await run('an API without request lookup permits checks only', async () => {
+      const f = await fixture(browser);
+      const { page, state } = f;
+      state.postMode = 'lost-never';
+      state.missingLookupRoute = true;
+      await f.open('a');
+      await clickGenerate(page);
+      await page.getByRole('button', { name: 'Check request' }).waitFor();
+      const original = state.captures[0].body.requestId;
+      await page.reload();
+      const failure = page.getByText(/Could not check this request/);
+      await failure.waitFor();
+      assert.equal(await generate(page).isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: 'Resubmit request' }).count(), 0);
+      await page.getByRole('button', { name: 'Check request' }).click();
+      await failure.waitFor();
+      assert.equal(await generate(page).isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: 'Resubmit request' }).count(), 0);
+      assert.ok(state.requests.filter(r => r.path.endsWith('/generation-requests/' + original) && r.method === 'GET').length >= 2);
+      assert.equal(state.captures.length, 1);
+      assert.equal(state.dispatches, 0);
+      await f.close();
+    });
+    await run('memory-only request retains its reload warning on same-tab return', async () => {
+      const f = await fixture(browser, { denyStorageWrites: true });
+      const { page, state } = f;
+      state.postMode = 'lost-never';
+      await f.open('a');
+      await clickGenerate(page);
+      const warning = page.getByText(/reload cannot resolve an unknown submission/i);
+      await warning.waitFor();
+      await page.getByRole('button', { name: 'Check request' }).waitFor();
+      assert.equal(await page.evaluate(() => sessionStorage.getItem('storyboards.generation.account-a.a')), null);
+      const original = state.captures[0].body.requestId;
+      await spa(page, 'b');
+      await generate(page).waitFor();
+      await spa(page, 'a');
+      await page.getByRole('button', { name: 'Resubmit request' }).waitFor();
+      assert.equal(await warning.isVisible(), true);
+      assert.ok(state.requests.some(r => r.method === 'GET' && r.path.endsWith('/generation-requests/' + original)));
+      assert.equal(state.captures.length, 1);
+      state.postMode = 'accept';
+      await page.getByRole('button', { name: 'Resubmit request' }).click();
+      await eventually(() => state.dispatches === 1, 'explicit retry missing');
+      assert.deepEqual(state.captures.map(c => c.body.requestId), [original, original]);
       await f.close();
     });
     await run('poll ceiling offers manual check without new POST', async () => {
