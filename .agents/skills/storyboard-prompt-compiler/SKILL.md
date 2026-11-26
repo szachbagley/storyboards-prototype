@@ -218,6 +218,8 @@ Exceeding the character cap does not error upstream — faces blend and drift in
 
 ## Debugging inconsistency
 
+For a continuity attempt, compare the frozen source frame **and selected generation** with the editor’s current selection. Later edits, source deletion, selection changes and frame reordering do not change the input bytes retained by an accepted attempt. A source match describes only that selection. An unversioned or malformed snapshot cannot establish which source was used. Compiler fixture tests verify prompts and byte order. Visual fidelity requires separately approved model evaluation.
+
 When a character drifts across frames, check in this order:
 
 1. **Is the reference image actually attached?** A concept with a null `image_key` contributes text only, and text alone will not hold identity. This is the most common cause by a wide margin.

@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
-import type { FrameDto } from "@storyboards/shared";
+import type { FrameDto, FrameSummaryDto } from "@storyboards/shared";
 import { api, ApiError, getToken } from "./api.js";
 
 interface DraftField<T> {
@@ -27,6 +27,8 @@ export function useFrameEdits(frameId: string, storyId: string) {
   });
   const latest = useRef(data);
   const [readError, setReadError] = useState<string | null>(null);
+  const [sources, setSources] = useState<FrameSummaryDto[] | null>(null);
+  const [sourceListError, setSourceListError] = useState<string | null>(null);
   const mounted = useRef(false);
   const [session] = useState(getToken);
   const current = useCallback(() => mounted.current && getToken() === session, [session]);
@@ -64,19 +66,38 @@ export function useFrameEdits(frameId: string, storyId: string) {
     const number = ++readNumber.current;
     reading.current = true;
     const valid = () => current() && stamp === epoch.current && number === readNumber.current;
-    void api.getFrame(frameId).then(frame => {
-      if (valid()) merge(frame);
+    void api.getFrame(frameId).then(async frame => {
+      if (!valid()) return;
+      merge(frame);
+      if (frame.continuityEnabled !== true) {
+        setSources(null);
+        setSourceListError(null);
+        return;
+      }
+      try {
+        const rows = await api.listStoryFrames(storyId);
+        if (!valid()) return;
+        if (!rows.some(row => row.id === frameId) || rows.some(row => row.storyId !== storyId)) {
+          throw new Error("Could not verify the source frames in this story.");
+        }
+        setSources(rows);
+        setSourceListError(null);
+      } catch (error) {
+        if (valid()) setSourceListError(error instanceof Error ? error.message : "Could not load source frames.");
+      }
     }).catch((error: unknown) => {
       if (valid()) setReadError(error instanceof Error ? error.message : "Could not load the frame.");
     }).finally(() => {
       if (number === readNumber.current) reading.current = false;
     });
-  }, [current, frameId, merge]);
+  }, [current, frameId, storyId, merge]);
 
   useLayoutEffect(() => {
     mounted.current = true;
     reload();
+    window.addEventListener("focus", reload);
     return () => {
+      window.removeEventListener("focus", reload);
       mounted.current = false;
       epoch.current++;
     };
@@ -130,10 +151,10 @@ export function useFrameEdits(frameId: string, storyId: string) {
     const saveDescription = generationBarrier || description.dirty;
     const saveSource = generationBarrier || source.dirty;
     if (!saveDescription && !saveSource) return;
-    if (!generationBarrier && (!saveDescription || description.value === saved.description) &&
-        (!saveSource || source.value === (saved.continuitySourceFrameId ?? null))) {
-      merge(saved, { description: saveDescription ? description.sequence : undefined,
-        source: saveSource ? source.sequence : undefined });
+    // A rejected earlier source write can have reached the server. Reassert
+    // every explicit source choice, even a return to the last acknowledged ID.
+    if (!saveSource && description.value === saved.description) {
+      merge(saved, { description: description.sequence });
       return;
     }
     const frame = await api.updateFrame(frameId, {
@@ -160,5 +181,5 @@ export function useFrameEdits(frameId: string, storyId: string) {
     });
   }
 
-  return { ...data, readError, latest, reload, current, enqueue, merge, edit, save, preserveIntent };
+  return { ...data, readError, sources, sourceListError, latest, reload, current, enqueue, merge, edit, save, preserveIntent };
 }

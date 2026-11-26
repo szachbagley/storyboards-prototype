@@ -100,6 +100,8 @@ export interface GenerationSummaryDto {
 
 /** A frame as rendered in the editor. */
 export interface FrameDto extends FrameSummaryDto {
+  /** Older APIs omit this flag. Only explicit true enables the picker. */
+  continuityEnabled?: boolean;
   /** In frame_concepts.ord order. This ordering is the origin of invariant 5:
    * it becomes the reference-image enumeration order in the compiled prompt. */
   concepts: ConceptDto[];

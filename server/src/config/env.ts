@@ -13,6 +13,7 @@ loadDotenv({ path: new URL("../../.env", import.meta.url), quiet: true });
 // section 11.
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  CONTINUITY_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   PORT: z.coerce.number().int().positive().default(3001),
   DATABASE_URL: z.string().min(1),
   DATABASE_SSL: z

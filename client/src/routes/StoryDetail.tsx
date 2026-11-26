@@ -79,7 +79,7 @@ export function StoryDetail() {
         <ConfirmButton
           label="Delete story"
           confirmLabel="Delete story permanently"
-          message="Deleting this story also removes its frames, source links, and saved continuity inputs."
+          message="Deleting this story also removes its frames, generated outputs, source links, and saved continuity inputs. Already accepted generation work may still finish or be billed."
           busy={busy}
           onConfirm={onDeleteStory}
         />

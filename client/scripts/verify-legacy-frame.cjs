@@ -7,7 +7,9 @@ async function main() {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
   try {
     const page = await browser.newPage({ serviceWorkers: "block" });
-    const origin = "http://127.0.0.1:5173";
+    const origin = process.env.UI_ORIGIN || "http://127.0.0.1:5173";
+    const parsed = new URL(origin);
+    if (parsed.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname) || parsed.origin !== origin) throw Error("UI_ORIGIN must be an HTTP loopback origin");
     const errors = [];
     page.on("pageerror", e => errors.push(e.message));
     await page.addInitScript(() => localStorage.setItem("storyboards.session", "fixture"));
@@ -15,7 +17,7 @@ async function main() {
       selectedGenerationId: "generation", imageUrl: null, concepts: [], generations: [] };
     await page.route("**/*", async route => {
       const url = new URL(route.request().url());
-      if (url.origin === origin) return route.continue();
+      if (url.origin === origin && !url.pathname.startsWith("/api/")) return route.continue();
       if (url.origin === "http://mock.invalid" && route.request().method() === "GET") {
         const fixtures = { "/api/auth/me": { id: "user", username: "fixture" },
           "/api/concepts": [], "/api/frames/frame": frame };
@@ -40,7 +42,7 @@ async function main() {
       delete frame.continuitySourceSelectedGenerationId;
       Object.assign(frame, current);
       await page.goto(origin + "/stories/story/frames/frame");
-      await page.getByText(expected, { exact: false }).waitFor({ timeout: 4000 });
+      await page.getByRole("region", { name: "Generation history" }).getByText(expected, { exact: false }).waitFor({ timeout: 4000 });
       assert.equal(await page.locator("textarea").first().inputValue(), frame.description);
       if (expected !== "Used current source selection.") {
         assert.equal(await page.getByText(/Used current source selection|Current source selection differs/).count(), 0);
