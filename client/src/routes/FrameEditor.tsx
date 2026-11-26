@@ -5,10 +5,41 @@ import {
   MAX_TOTAL_CONCEPTS,
   type ConceptDto,
   type FrameDto,
+  type GenerationSummaryDto,
 } from "@storyboards/shared";
 import { ApiError, api } from "../api.js";
 import { ConfirmButton } from "../components/ConfirmButton.js";
 import { useApi, useGenerationPolling } from "../hooks.js";
+
+// A client can outlive an API rollback. Omitted response fields carry no
+// evidence about the historical or current selection; explicit null does.
+type HistoryContinuity = GenerationSummaryDto["continuity"] | null | undefined;
+type CurrentSelection = Partial<Pick<FrameDto,
+  "continuitySourceFrameId" | "continuitySourceSelectedGenerationId">>;
+
+function ContinuityNote({ continuity, frame }: { continuity: HistoryContinuity; frame: CurrentSelection }) {
+  const description = continuityDescription(continuity, frame);
+  return description && <p className="muted">{description}</p>;
+}
+
+function continuityDescription(continuity: HistoryContinuity, frame: CurrentSelection): string | null {
+  if (continuity == null) return "Continuity provenance unavailable.";
+  if (continuity.provenance !== "known") {
+    return continuity.provenance === "legacy" ? "Continuity provenance unavailable for this legacy generation." : "Continuity provenance unknown.";
+  }
+  const source = continuity.source;
+  if (frame.continuitySourceFrameId === undefined || frame.continuitySourceSelectedGenerationId === undefined) {
+    return source?.sourceFrameDeleted
+      ? "Used deleted source frame. Current source selection unavailable."
+      : "Current source selection unavailable.";
+  }
+  const differs = (source?.frameId ?? null) !== frame.continuitySourceFrameId ||
+    (source?.generationId ?? null) !== frame.continuitySourceSelectedGenerationId;
+  if (!differs) return source ? "Used current source selection." : null;
+  const used = source?.sourceFrameDeleted ? "Used deleted source frame." :
+    source ? "Used another source selection." : "Generated without a continuity source.";
+  return used + " Current source selection differs; regenerate manually to use it.";
+}
 
 export function FrameEditor() {
   const { storyId = "", frameId = "" } = useParams();
@@ -21,9 +52,15 @@ export function FrameEditor() {
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [deleteReview, setDeleteReview] = useState<{ frameId: string; message: string; token: string; changed: boolean } | null>(null);
   const [generationId, setGenerationId] = useState<string | null>(null);
 
   const { generation, elapsedSeconds, timedOut } = useGenerationPolling(generationId);
+
+  useEffect(() => {
+    setDeleteReview(null);
+    setActionError(null);
+  }, [frameId]);
 
   useEffect(() => {
     if (frame) setDescription(frame.description);
@@ -118,14 +155,25 @@ export function FrameEditor() {
     }
   }
 
-  async function onDelete() {
-    if (!frame) return;
+  async function onDelete(token?: string) {
+    if (!frame || frame.id !== frameId) return;
     setBusy("delete");
     try {
-      await api.deleteFrame(frame.id);
+      setActionError(null);
+      await api.deleteFrame(frame.id, token);
       navigate(`/stories/${storyId}`, { replace: true });
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : String(err));
+      if (err instanceof ApiError && err.status === 409 && err.code === "continuity_source_in_use" &&
+          typeof err.details === "object" && err.details !== null &&
+          "referencedByCount" in err.details && typeof err.details.referencedByCount === "number" &&
+          "referenceSetToken" in err.details && typeof err.details.referenceSetToken === "string") {
+        setDeleteReview({
+          frameId: frame.id, message: err.message, token: err.details.referenceSetToken,
+          changed: token !== undefined,
+        });
+      } else {
+        setActionError(err instanceof ApiError ? err.message : String(err));
+      }
       setBusy(null);
     }
   }
@@ -142,7 +190,16 @@ export function FrameEditor() {
           <Link to={`/stories/${storyId}`} className="back" aria-label="Back to story">‹</Link>
           <h1>Frame</h1>
         </div>
-        <ConfirmButton label="Delete frame" confirmLabel="Delete frame permanently" busy={busy === "delete"} onConfirm={onDelete} />
+        {deleteReview?.frameId === frameId ? (
+          <div>
+            {deleteReview.changed && <p>The frames using this source have changed. Review the updated warning and confirm again.</p>}
+            <p>{deleteReview.message}</p>
+            <div className="row">
+              <button className="btn btn-danger" type="button" disabled={busy === "delete"} onClick={() => void onDelete(deleteReview.token)}>Confirm deletion</button>
+              <button className="btn" type="button" disabled={busy === "delete"} onClick={() => { setDeleteReview(null); setActionError(null); }}>Cancel</button>
+            </div>
+          </div>
+        ) : <ConfirmButton key={frameId} label="Delete frame" confirmLabel="Delete frame permanently" busy={busy === "delete"} onConfirm={() => void onDelete()} />}
       </div>
 
       {actionError && <div className="error-banner">{actionError}</div>}
@@ -204,20 +261,22 @@ export function FrameEditor() {
               <h2 style={{ marginTop: 24 }}>History</h2>
               <div className="history">
                 {frame.generations.map((g) => (
-                  <button
-                    key={g.id}
-                    type="button"
-                    className={`history-item${g.id === frame.selectedGenerationId ? " history-selected" : ""}`}
-                    disabled={busy === "select" || g.status !== "succeeded"}
-                    title={g.status === "succeeded" ? "Use this generation" : (g.errorCode ?? g.status)}
-                    onClick={() => void onSelect(g.id)}
-                  >
-                    {g.imageUrl ? (
-                      <img className="history-thumb" src={g.imageUrl} alt="Previous generation" />
-                    ) : (
-                      <div className="history-failed">{g.status === "pending" ? "…" : (g.errorCode ?? "failed")}</div>
-                    )}
-                  </button>
+                  <div key={g.id}>
+                    <button
+                      type="button"
+                      className={`history-item${g.id === frame.selectedGenerationId ? " history-selected" : ""}`}
+                      disabled={busy === "select" || g.status !== "succeeded"}
+                      title={g.status === "succeeded" ? "Use this generation" : (g.errorCode ?? g.status)}
+                      onClick={() => void onSelect(g.id)}
+                    >
+                      {g.imageUrl ? (
+                        <img className="history-thumb" src={g.imageUrl} alt="Previous generation" />
+                      ) : (
+                        <div className="history-failed">{g.status === "pending" ? "…" : (g.errorCode ?? "failed")}</div>
+                      )}
+                    </button>
+                    <ContinuityNote continuity={g.continuity} frame={frame} />
+                  </div>
                 ))}
               </div>
               <p className="muted">Regenerating adds to this list; it never replaces the selected image.</p>

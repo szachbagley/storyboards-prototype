@@ -405,10 +405,7 @@ the object until ownership is established. Existing concept uploads still
 overwrite `concepts/{conceptId}/reference.jpg` in place. A metadata capture
 followed by that overwrite can pair an earlier description with later image
 bytes, so concept images remain non-replayable despite recorded byte hashes.
-This section does not approve copy retention, change bucket lifecycle policy,
-add an asset service, or enable the source configuration or generation path.
-Bucket lifecycle compatibility and the retention policy require review before
-the integrated continuity feature is released.
+The retention and deletion contract for these inputs is described below.
 
 ---
 
@@ -435,9 +432,28 @@ guarantee. An ambiguous copy PUT or failed cleanup can leave a private orphan.
 The approved retention rule covers every accepted attempt, including failures.
 Keep its private input after source deletion, until its destination frame or
 story is deleted. The normal application keeps source configuration and new
-source-backed admission closed while destination cleanup (#12) is outstanding.
-The disposable HTTP fixture explicitly exercises the integrated path. Confirm
-bucket lifecycle compatibility and destination cleanup before opening ingress.
+source-backed admission closed pending a coherent release and verification that
+bucket lifecycle rules permit this retention. The disposable HTTP fixture
+explicitly exercises the integrated path.
+
+### Confirming deletion and cleaning up retained inputs
+
+An unconfirmed `DELETE /frames/:id` succeeds when no other frame references it.
+Otherwise the server returns `409 continuity_source_in_use` with the current
+`referencedByCount` and `referenceSetToken`. The token is the lowercase SHA-256
+of the sorted dependent UUIDs joined with LF. After reviewing the consequences,
+send `?confirmContinuity=true&referenceSetToken=<token>`. If membership changed,
+even to an empty set or a different set of the same size, the server returns an
+updated challenge. Each challenge requires an explicit decision.
+
+Deletion locks the owned story and source, checks the set, clears incoming
+source links and updates those frames' timestamps in the same transaction.
+Historical outputs and frozen inputs on surviving frames remain available.
+Accepted work may still complete and bill. A frame or story deletion collects
+its generations' outputs and valid V2 inputs under the story lock, including
+inputs of failed or pending attempts. Only a copy key matching that generation's
+own derived key is eligible. Individual object deletes follow commit. A failed
+object delete or lost commit acknowledgement may leave a private orphan.
 
 ## 10. Authentication
 

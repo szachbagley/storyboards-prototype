@@ -321,6 +321,27 @@ export async function replaceFrameConcepts(
   );
 }
 
+/** Caller holds the owned story and source locks. UUID order is the protocol
+ * order for the dependent-set fingerprint. */
+export async function dependentFrameIds(
+  client: pg.PoolClient, sourceId: string, storyId: string, userId: string,
+): Promise<string[]> {
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT f.id FROM frames f JOIN stories s ON s.id = f.story_id
+      WHERE f.continuity_source_frame_id = $1 AND s.id = $2 AND s.user_id = $3
+      ORDER BY f.id`, [sourceId, storyId, userId]);
+  return rows.map(row => row.id);
+}
+
+export async function clearDependentFrames(
+  client: pg.PoolClient, sourceId: string, storyId: string, userId: string,
+): Promise<void> {
+  await client.query(
+    `UPDATE frames f SET continuity_source_frame_id = NULL, updated_at = now()
+       FROM stories s WHERE f.story_id = s.id AND s.id = $2 AND s.user_id = $3
+         AND f.continuity_source_frame_id = $1`, [sourceId, storyId, userId]);
+}
+
 export async function deleteFrame(client: pg.PoolClient, id: string, userId: string): Promise<boolean> {
   const { rowCount } = await client.query(
     "DELETE FROM frames WHERE id = $1 AND story_id IN (SELECT id FROM stories WHERE user_id = $2)",

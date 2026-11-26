@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { GenerateFrameSchema, SelectGenerationSchema, UpdateFrameSchema, UuidParamSchema } from "@storyboards/shared";
+import { DeleteFrameQuerySchema, GenerateFrameSchema, SelectGenerationSchema, UpdateFrameSchema, UuidParamSchema } from "@storyboards/shared";
 import { requireUser } from "../middleware/auth.js";
 import * as frames from "../services/frames.js";
 import * as generation from "../services/generation.js";
@@ -42,7 +42,7 @@ export function createFramesRouter(continuityEnabled: boolean): Router {
 
   framesRouter.delete("/frames/:id", async (req, res) => {
     const { id } = UuidParamSchema.parse(req.params);
-    await frames.deleteFrame(id, requireUser(req).id);
+    await frames.deleteFrame(id, requireUser(req).id, DeleteFrameQuerySchema.parse(req.query));
     res.status(204).end();
   });
   return framesRouter;

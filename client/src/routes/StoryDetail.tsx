@@ -78,7 +78,8 @@ export function StoryDetail() {
         </div>
         <ConfirmButton
           label="Delete story"
-          confirmLabel="Delete story and all its frames"
+          confirmLabel="Delete story permanently"
+          message="Deleting this story also removes its frames, source links, and saved continuity inputs."
           busy={busy}
           onConfirm={onDeleteStory}
         />

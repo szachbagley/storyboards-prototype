@@ -1,10 +1,10 @@
 import type { CreateStoryBody, StoryDto } from "@storyboards/shared";
 import * as db from "../db/stories.js";
-import * as generationsDb from "../db/generations.js";
+import { ownedGenerationKeys, deleteGenerationObjects } from "./generationCleanup.js";
 import type { StoryRow } from "../db/stories.js";
 import { AppError } from "../lib/AppError.js";
 import { withTransaction } from "../db/pool.js";
-import { deleteObject, getPresignedUrl } from "./s3.js";
+import { getPresignedUrl } from "./s3.js";
 
 async function toDto(row: StoryRow): Promise<StoryDto> {
   return {
@@ -43,20 +43,10 @@ export async function updateStory(id: string, userId: string, title: string): Pr
 export async function deleteStory(id: string, userId: string): Promise<void> {
   const imageKeys = await withTransaction(async (client) => {
     if (!(await db.lockStoryForUpdate(client, id, userId))) throw notFound(id);
-    const keys = await generationsDb.imageKeysForStory(client, id, userId);
+    const keys = await ownedGenerationKeys(client, id, userId, null);
     if (!(await db.deleteStory(client, id, userId))) throw notFound(id);
     return keys;
   });
 
-  // Best effort -- the rows are already gone, so a failed object delete must
-  // not fail the request.
-  await Promise.all(
-    imageKeys.map(async (key) => {
-      try {
-        await deleteObject(key);
-      } catch (err) {
-        console.error(`[stories] failed to delete generation object ${key}`, err);
-      }
-    }),
-  );
+  await deleteGenerationObjects(imageKeys);
 }
