@@ -125,3 +125,26 @@ h2 { font-size: 15px; margin: 0 0 10px; text-transform: uppercase; letter-spacin
 
 /* --- login --- */
 .login { max-width: 340px; margin: 12vh auto 0; display: flex; flex-direction: column; gap: 14px; }
+
+.continuity-picker {
+  margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: 6px;
+  min-width: 0; font-size: 14px;
+}
+.continuity-picker legend { font-weight: 650; }
+.continuity-picker p { margin: 0 0 8px; line-height: 1.45; }
+.source-choice {
+  display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 0;
+  overflow-wrap: anywhere;
+}
+.source-choice + .source-choice { border-top: 1px solid var(--line); }
+.source-choice input { flex: none; }
+.source-choice strong, .source-choice .muted { display: block; }
+.source-excerpt { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.source-thumbnail { width: 74px; flex: none; }
+.source-unavailable, .provenance { overflow-wrap: anywhere; }
+.selected-output { margin-top: 12px; }
+.provenance { color: var(--muted); font-size: 13px; }
+.provenance p { margin: 4px 0; }
+.provenance summary { cursor: pointer; }
+.history > div { width: 155px; max-width: 100%; }
+.frame-layout > * { min-width: 0; }

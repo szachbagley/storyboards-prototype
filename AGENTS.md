@@ -19,7 +19,7 @@ Automatic discovery of `AGENTS.md` and `.agents/skills/` varies by agent and too
 
 ## What this is
 
-A multi-user storyboard generator. Each account maintains its own private library of **Concepts** (characters, settings, props), each with a reference image and an identity description. They write **Frames** inside **Stories**, attach concepts, and generate images via Nano Banana. The concept reference images are sent with every generation request — that is the mechanism that keeps a character looking the same across frames.
+A multi-user storyboard generator. Each account maintains its own private library of **Concepts** (characters, settings, props), each with a reference image and an identity description. They write **Frames** inside **Stories**, attach concepts, and generate images via Nano Banana. Attached concept images establish identity. A frame can also use one earlier or later same-story frame’s selected image as a visual starting point. Choosing a source or changing its output never starts a generation.
 
 **This is a rough proof-of-concept.** Build the smallest thing that works. Do not add features, abstractions, or configuration surface that the spec does not call for.
 
@@ -117,6 +117,8 @@ Violating any of these is a bug even if the code runs.
 
 **12. A user's API key is encrypted at rest and never returned.** AES-256-GCM under `ENCRYPTION_KEY`, decrypted only at the call site. No endpoint returns it — `GET /auth/me` exposes `hasGeminiKey` and a 4-character hint. It never enters `input_snapshot` or a log line.
 
+**13. Continuity is an explicit per-attempt input.** The server advertises its `CONTINUITY_ENABLED` setting on frame detail. Treat missing capability as unavailable. Keep the chosen source through temporarily unusable states, enforce the effective concept limit, and compare frozen source and generation IDs with current IDs. Preserve each accepted attempt’s private continuity JPEG, including failed attempts, until its destination frame or story is deleted. See [admission and object lifecycle](TECH_SPEC.md#9-object-storage).
+
 ---
 
 ## Conventions
@@ -176,7 +178,7 @@ Minimal but non-zero. Five areas earn tests:
 4. **Meta-prompt fidelity** — the description meta-prompts must stay byte-identical to the `storyboard-prompt-compiler` skill.
 5. **Credential handling** — password hash/verify, session token generation and hashing, Gemini key encrypt/decrypt. Pure functions whose failure modes are silent and total.
 
-Ownership isolation is verified by a scripted matrix against a live database (two accounts, every endpoint), not by unit tests.
+Verify ownership, admission races and deletion with fixture accounts in a disposable loopback database. For continuity, preload the offline transport guard before importing the app, stub storage and all provider operations, and exercise closed and enabled capability modes. The bounded SQL/HTTP checks and browser fixture commands are listed in [the testing section](TECH_SPEC.md#14-testing).
 
 Everything else is exercised by using the app. Do not write tests for CRUD handlers.
 

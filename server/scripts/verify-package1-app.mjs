@@ -162,6 +162,7 @@ try {
   const storyB = await request("POST", "/stories", b.token, { title: "other story" }, 201);
   const frame = await request("POST", `/stories/${storyA.id}/frames`, a.token,
     { description: "  Authored scene.  " }, 201);
+  assert.equal(frame.continuityEnabled, continuityEnabled);
   const other = await request("POST", `/stories/${storyB.id}/frames`, b.token,
     { description: "other" }, 201);
   await request("GET", `/frames/${other.id}`, a.token, undefined, 404);
@@ -176,7 +177,8 @@ try {
     [conceptKey, concept.id]);
   assert.equal((await request("POST", `/concepts/${concept.id}/describe`,
     a.token, {}, 200)).description, "Fixture description");
-  await request("PATCH", `/frames/${frame.id}`, a.token, { conceptIds: [concept.id] }, 200);
+  const patched = await request("PATCH", `/frames/${frame.id}`, a.token, { conceptIds: [concept.id] }, 200);
+  assert.equal(patched.continuityEnabled, continuityEnabled);
   console.log("offline app: fixture registration/key validation, describe, and ownership passed");
 
   const idempotencyKey = "910c2ec7-6ee6-4826-9816-1f38b621324e";
@@ -199,6 +201,7 @@ try {
   assert.equal(indexedConflict.error.details.generationId, started.generationId);
   assert.equal(state.calls.generate, 1);
   const detail = await request("GET", `/frames/${frame.id}`, a.token, undefined, 200);
+  assert.equal(detail.continuityEnabled, continuityEnabled);
   const poll = await request("GET", `/generations/${started.generationId}`, a.token, undefined, 200);
   assert.deepEqual(poll.continuity, { provenance: "known", source: null });
   for (const dto of [detail, poll]) {
@@ -220,6 +223,9 @@ try {
   await waitFor(async () => (await status(started.generationId)).status === "succeeded");
   assert.equal((await db.query("SELECT selected_generation_id FROM frames WHERE id = $1",
     [frame.id])).rows[0].selected_generation_id, started.generationId);
+  const selected = await request("POST", `/frames/${frame.id}/select-generation`, a.token,
+    { generationId: started.generationId }, 200);
+  assert.equal(selected.continuityEnabled, continuityEnabled);
   const terminalReplay = await request("POST", `/frames/${frame.id}/generate`, a.token,
     { requestId: idempotencyKey }, 202);
   assert.equal(terminalReplay.generationId, started.generationId);
@@ -313,8 +319,11 @@ try {
   await db.query("UPDATE frames SET continuity_source_frame_id = $1 WHERE id = $2",
     [source.id, frame.id]);
   const priorCalls = state.calls.generate;
-  await request("POST", `/frames/${frame.id}/generate`, a.token,
+  const refused = await request("POST", `/frames/${frame.id}/generate`, a.token,
     { requestId: "1240af5c-6bc8-4da8-9a76-cff787ece7b5" }, 422);
+  assert.equal(refused.error.code, continuityEnabled ? "continuity_source_unusable" : "continuity_unavailable");
+  const preserved = await request("GET", `/frames/${frame.id}`, a.token, undefined, 200);
+  assert.equal(preserved.continuitySourceFrameId, source.id);
   assert.equal(state.calls.generate, priorCalls);
   await request("PATCH", `/frames/${frame.id}`, a.token,
     { continuitySourceFrameId: null }, 200);

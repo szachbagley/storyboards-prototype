@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { DeleteFrameQuerySchema, GenerateFrameSchema, SelectGenerationSchema, UpdateFrameSchema, UuidParamSchema } from "@storyboards/shared";
+import { CreateFrameSchema, DeleteFrameQuerySchema, GenerateFrameSchema, SelectGenerationSchema, UpdateFrameSchema, UuidParamSchema } from "@storyboards/shared";
 import { requireUser } from "../middleware/auth.js";
 import * as frames from "../services/frames.js";
 import * as generation from "../services/generation.js";
@@ -7,9 +7,15 @@ import * as generation from "../services/generation.js";
 export function createFramesRouter(continuityEnabled: boolean): Router {
   const framesRouter = Router();
 
+  framesRouter.post("/stories/:id/frames", async (req, res) => {
+    const { id } = UuidParamSchema.parse(req.params);
+    const body = CreateFrameSchema.parse(req.body);
+    res.status(201).json(await frames.createFrame(id, requireUser(req).id, body, continuityEnabled));
+  });
+
   framesRouter.get("/frames/:id", async (req, res) => {
     const { id } = UuidParamSchema.parse(req.params);
-    res.json(await frames.getFrame(id, requireUser(req).id));
+    res.json(await frames.getFrame(id, requireUser(req).id, continuityEnabled));
   });
 
   framesRouter.patch("/frames/:id", async (req, res) => {
@@ -37,7 +43,7 @@ export function createFramesRouter(continuityEnabled: boolean): Router {
     const { generationId } = SelectGenerationSchema.parse(req.body);
     const userId = requireUser(req).id;
     await generation.selectGeneration(id, generationId, userId);
-    res.json(await frames.getFrame(id, userId));
+    res.json(await frames.getFrame(id, userId, continuityEnabled));
   });
 
   framesRouter.delete("/frames/:id", async (req, res) => {

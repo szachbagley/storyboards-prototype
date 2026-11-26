@@ -41,7 +41,8 @@ the read-only `models.list` metadata endpoint solely to check key acceptance.
 - Story CRUD: title only
 - Frame CRUD within a story: freeform description, concept attachment, ordering
 - Frame image generation via Nano Banana with concept reference images attached
-- Generation history per frame with a selected result
+- Optional explicit image continuity from the selected output of one other frame in the same story, earlier or later
+- Generation history per frame with a selected result and frozen source provenance
 - Accounts: username, password, and a per-user Gemini API key
 - Session-based authentication; each account sees only its own data
 
@@ -73,7 +74,7 @@ A named container for an ordered sequence of frames. Carries no styling or confi
 
 ### Frame
 
-A single storyboard panel. Holds a freeform scene description authored by the user, an ordered set of attached concepts, and a pointer to the currently selected generation.
+A single storyboard panel. Holds a freeform scene description authored by the user, an ordered set of attached concepts, a pointer to the currently selected generation, and an optional same-story source frame. Frame UUIDs survive reordering. Two frames may select each other because each generation reads only its immediate source.
 
 ### Generation
 
@@ -149,27 +150,18 @@ ALTER TABLE frames
   FOREIGN KEY (selected_generation_id) REFERENCES generations(id) ON DELETE SET NULL;
 ```
 
+Migration [003_frame_continuity.sql](server/migrations/003_frame_continuity.sql) adds nullable `frames.continuity_source_frame_id` with a self-reference check, an indexed foreign key with `ON DELETE SET NULL`, and nullable `generations.request_id`. Separate partial unique indexes enforce one pending row per frame and one row per non-null request UUID per frame. An existing duplicate-pending group aborts the migration transaction. Investigate it before retrying. Existing generation snapshots and the sweep index survive migration.
+
 ### 5.1 `input_snapshot` shape
 
-Concepts are mutable and shared. Without a snapshot, editing a concept description silently invalidates the provenance of every frame already generated from it.
+New generation rows store a server-only V2 snapshot. `schemaVersion: 2`, `compilerVersion: "explicit-continuity-v1"` and `capturedAt` accompany the verbatim `frameDescription`, `aspectRatio`, `imageSize`, and ordered `concepts`. Each concept records its UUID, order, name, type, description, image key, MIME type and hash of the bytes sent. An imageless attachment has null image fields.
 
-```jsonc
-{
-  "frameDescription": "Spaceman stands menacingly on a red planet...",
-  "aspectRatio": "16:9",
-  "imageSize": "1K",
-  "concepts": [
-    {
-      "id": "uuid",
-      "ord": 0,
-      "name": "Spaceman",
-      "type": "character",
-      "description": "<description as it read at generation time>",
-      "imageKey": "concepts/uuid/reference.jpg"
-    }
-  ]
-}
-```
+| `continuity` value | Recorded meaning |
+|---|---|
+| `null` | This attempt ran without a source. |
+| Object | `sourceFrameId`, `sourceGenerationId`, position at capture, original storage key and SHA-256, and the attempt-owned JPEG key, MIME type and SHA-256. |
+
+The client receives a limited historical projection. A recognized unversioned snapshot yields `legacy`, an unrecognized or malformed snapshot yields `unknown`, and valid V2 yields `known` with null or the source and generation IDs plus `sourceFrameDeleted`. Snapshots and object keys stay private. Captured IDs continue to describe an attempt after source deletion.
 
 ### 5.2 Ordering
 
@@ -205,11 +197,11 @@ All routes are prefixed `/api`. Health, registration, and login are public; user
 | `POST` | `/stories` | `{ title }` |
 | `PATCH` | `/stories/:id` | `{ title }` |
 | `DELETE` | `/stories/:id` | Cascades to frames and generations |
-| `GET` | `/stories/:id/frames` | Ordered by position; includes selected generation URL |
+| `GET` | `/stories/:id/frames` | Ordered by position and UUID, with selected image URL, readiness, source IDs and dependent count |
 | `POST` | `/stories/:id/frames` | Appends; `{ description? }` |
-| `GET` | `/frames/:id` | Includes attached concepts and generation history |
-| `PATCH` | `/frames/:id` | `{ description?, conceptIds?, position? }` |
-| `DELETE` | `/frames/:id` | |
+| `GET` | `/frames/:id` | Includes attached concepts, history and the server boolean `continuityEnabled` |
+| `PATCH` | `/frames/:id` | `{ description?, conceptIds?, position?, continuitySourceFrameId? }` |
+| `DELETE` | `/frames/:id` | Exact dependent-set confirmation when referenced (§9) |
 
 `conceptIds` is an ordered array and replaces the attachment set wholesale. Array index becomes `frame_concepts.ord`.
 
@@ -217,7 +209,8 @@ All routes are prefixed `/api`. Health, registration, and login are public; user
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/frames/:id/generate` | Returns `202` with `{ generationId }` |
+| `POST` | `/frames/:id/generate` | Optional `{ requestId, expectedContinuitySourceFrameId }`. Returns `202 { generationId }` |
+| `GET` | `/frames/:id/generation-requests/:requestId` | Looks up an owned accepted request and returns its generation ID or 404. Creates no work. |
 | `GET` | `/generations/:id` | Poll target; returns status and, on success, a presigned URL |
 | `POST` | `/frames/:id/select-generation` | `{ generationId }` |
 
@@ -227,11 +220,11 @@ All routes are prefixed `/api`. Health, registration, and login are public; user
 
 No queue, no Redis. A single API process serves multiple accounts; all user-data operations remain scoped to the authenticated owner.
 
-1. `POST /frames/:id/generate` loads the frame with its concepts, validates (§8.3), compiles the prompt (§8.4), inserts a `generations` row with `status='pending'` and the compiled prompt and snapshot already written.
-2. The handler returns `202 { generationId }` immediately and fires the Gemini call without awaiting it.
-3. On success: decode the base64 image, `PutObject` to S3, update the row to `succeeded` with `image_key` and `interaction_id`, set `completed_at`. If the frame has no `selected_generation_id`, set it to this generation.
-4. On failure: update to `failed` with a classified `error_code` (§8.6).
-5. The client polls `GET /generations/:id` every 2s, with a client-side ceiling of 90s before showing a timeout state.
+1. Resolve a replay by owned frame and request UUID. Capture the current scene, ordered concept metadata and selected source generation together. Snapshot an eligible, succeeded output belonging to the selected frame. A configured source with no usable selected image gives `422 continuity_source_unusable`. A source-choice precondition mismatch gives `409 continuity_configuration_changed`.
+2. Validate the reference budget, read references, prepare the independent source JPEG and compile the prompt. A missing or invalid source image gives 422. Temporary or ambiguous storage failure gives `503 reference_storage_unavailable`. These failures happen before admission and provider dispatch.
+3. Lock the owned story then the destination frame, recheck admission, and insert the pending row with compiled prompt and frozen input. The owner of a confirmed commit dispatches the server-side call. The route returns `202 { generationId }`.
+4. Store the output, then complete only a still-pending owned generation. First success can select the image on an as-yet unselected frame. Deletion, sweep, and uncertain finalization use guarded cleanup so a late output cannot resurrect work or remove a committed selected image.
+5. The active editor polls without overlapping GETs at 2-second intervals. At 105 seconds it offers an explicit status check. The server may still finish.
 
 ### 7.1 Stale generation sweep
 
@@ -246,7 +239,7 @@ This is not optional. It is the difference between a prototype that recovers fro
 The image API is synchronous with no task handle. A dropped connection loses the image but still bills. Two rules follow:
 
 - The **backend** owns the Gemini call end to end. Never proxy a live Gemini request through to the browser.
-- `POST /frames/:id/generate` rejects with `409` if the frame already has a `pending` generation. This prevents double-fire from an impatient double-click.
+- The same accepted request UUID returns the original generation, even after completion. A different request while a generation is pending receives `409 generation_in_progress` with its ID. Distinct staggered requests can both run if the first finishes before the next admission. A bodyless legacy POST has no durable replay identity. A client recovering a lost response first looks up the UUID using GET. An ambiguous commit never causes automatic dispatch or a fresh POST.
 
 ---
 
@@ -281,19 +274,11 @@ Setting concepts get a narrower version of the same rule: describe the place, no
 
 ### 8.3 Reference image budget
 
-`gemini-3.1-flash-image` supports character resemblance for up to **4 characters** and high-fidelity inclusion for up to **10 objects**, with 14 reference images total.
-
-Validation on `POST /frames/:id/generate`:
-
-- At most 4 concepts of type `character` → `422` with a clear message
-- At most 10 concepts total → `422`
-- Concepts with a `NULL` `image_key` are included by description only, and the compiler omits their reference-image line
-
-The frame editor should surface remaining character slots rather than letting a user attach nine and receive slop.
+The application allows four character concepts and ten total attachment slots. Every attached concept counts, including text-only concepts. One configured continuity source reserves one slot, leaving room for nine concepts. Drafts may exceed either limit. The editor displays the counts, disables Generate when over budget, and leaves all attachments and the source selected. The server enforces both limits before dispatch.
 
 ### 8.4 Prompt compilation
 
-Output is an ordered array of Interactions API input parts. Text first, then image parts **in `frame_concepts.ord` order**.
+Output is an ordered array of Interactions API input parts. The compiled text comes first, then imaged concepts in `frame_concepts.ord` order, then the optional continuity JPEG. The source receives the next numbered reference label, including number 1 when no concept has an image. Its rules precede the verbatim Scene. Explicit target Scene instructions override conflicts with either the source or concept references. Concept references establish identity and the source supplies otherwise unspecified visual details. The compiler excludes source prompt, description, position and IDs. The no-source path preserves its original text and part ordering.
 
 ```
 <FORMAT_PREAMBLE — fixed constant>
@@ -363,11 +348,12 @@ A boolean failure state is not sufficient here. Storyboards skew violent — the
 
 ## 9. Object storage
 
-Two classes of object, one bucket:
+One private bucket stores three kinds of object.
 
 ```
-concepts/{conceptId}/reference.{ext}
+concepts/{conceptId}/reference.jpg
 generations/{generationId}.jpg
+generations/{generationId}/continuity.jpg
 ```
 
 **Uploads go through the backend**, not via presigned PUT. One code path, no bucket CORS configuration, and — most usefully — a place to run `sharp` before storing.
@@ -381,9 +367,9 @@ This is not cosmetic. Reference images gain nothing from being 12 megapixels, an
 
 **Reads** are served via presigned GET URLs with a 1-hour expiry, generated when the API returns a record. The bucket stays private.
 
-### 9.1 Continuity storage primitives (Package 2; not yet enabled)
+### 9.1 Continuity inputs
 
-A future admitted continuity attempt may stage one private JPEG at
+A source-backed attempt stages one private JPEG at
 `generations/{candidateGenerationId}/continuity.jpg`. The candidate generation
 UUID is distinct for every preflight, even when requests share an idempotency
 UUID. The staged copy uses the existing 1024px, quality-85 JPEG preprocessing.
@@ -409,7 +395,7 @@ The retention and deletion contract for these inputs is described below.
 
 ---
 
-### Explicit source admission (Package 4 rollout)
+### Source selection and retention
 
 An owned frame may reference another frame in its story, including a later
 frame. PATCH omission preserves the choice and null clears it. The server
@@ -431,10 +417,7 @@ guarantee. An ambiguous copy PUT or failed cleanup can leave a private orphan.
 
 The approved retention rule covers every accepted attempt, including failures.
 Keep its private input after source deletion, until its destination frame or
-story is deleted. The normal application keeps source configuration and new
-source-backed admission closed pending a coherent release and verification that
-bucket lifecycle rules permit this retention. The disposable HTTP fixture
-explicitly exercises the integrated path.
+story is deleted. No bucket expiry rule may remove a live target’s retained inputs. Verify lifecycle compatibility before enabling the feature. Delete by consuming generation ownership. The private copy survives deletion of the original source and is never exposed as a downloadable historical input.
 
 ### Confirming deletion and cleaning up retained inputs
 
@@ -565,6 +548,7 @@ to re-enter them.
 | `AWS_SECRET_ACCESS_KEY` | API | |
 | `AWS_REGION` | API | |
 | `S3_BUCKET` | API | |
+| `CONTINUITY_ENABLED` | API only | Literal `true` enables source selection and admission. Omitted or literal `false` keeps them closed. Other values reject startup. |
 | `VITE_API_BASE_URL` | Client | Railway API origin |
 
 There is no server-wide Gemini key. Each request uses the caller's own key, decrypted server-side; stored keys are never returned to the client, and all Gemini traffic originates from the Railway backend. Users submit their own keys through registration or Settings.
@@ -604,6 +588,16 @@ The frame view renders four distinct states: idle, generating (with elapsed time
 
 The frame view lists prior generations as thumbnails. Selecting one sets `selected_generation_id`. Regenerating never replaces the current image — it appends. This matters because the core loop of the app is generate-until-good, and a worse result overwriting a better one with no undo is the most likely source of user frustration.
 
+### 12.5 Source selection and request recovery
+
+The frame detail capability controls the picker. Only `continuityEnabled === true` enables new selection. False or an omitted field means unavailable. A configured source remains visible when unavailable and can be explicitly cleared. The picker offers None and every other frame in the story. Current position determines earlier/later labels. Thumbnails, excerpts and readiness distinguish eligible frames from those without usable selected output. An unusable current choice remains visible until explicitly changed. Metadata readiness does not prove the source object is readable at generation time.
+
+The selected output and each history item compare the frozen pair of source frame and generation UUIDs with the current pair. A match only describes the source selection. A changed source, newly selected source output, deleted source, known absence, legacy generation or unknown snapshot has its own indication. Reorder preserves identity. Focus, manual refresh and relevant changes update the last fetched view. None triggers generation.
+
+The account- and frame-keyed editor preserves dirty fields across refreshes. Blur, source/attachment changes and Generate share a save queue. Generate saves the clicked scene and source together, then sends that source as the admission precondition. A rejected save or changed configuration preserves the draft for review. Admission temporarily disables editing. After acceptance a draft edit applies to a later request.
+
+A new intent gets a UUID after successful saves. The client stores only outstanding IDs in account/frame-scoped tab session storage. A lost response or reload uses GET to check acceptance. A 404 allows explicit same-UUID resubmission after saving. The first admitted inputs win. Storage failure warns that reload recovery may be unavailable. A known terminal failure permits an explicit new attempt. Account change and navigation fence stale reads and polls. Separate tabs still use last-write-wins editing.
+
 ---
 
 ## 13. Build order
@@ -615,6 +609,10 @@ The frame view lists prior generations as thumbnails. Selecting one sets `select
 5. Prompt compiler as a **pure, unit-tested function** — inputs to string plus part array, no I/O
 6. Generation pipeline, stale sweep, error classification
 7. Client views in route order above
+
+For explicit continuity, the dependency order is additive admission schema → owned storage and preflight → pure compiler and budget → source API and provenance → confirmed deletion and cleanup → editor save/recovery lifecycle → picker and history. [Pinned implementation plan](https://github.com/szachbagley/storyboards-prototype/blob/892283f9876a53e36ef52908fb985de4ce5c9efb/continuity-plan.md)
+
+**Release and backout.** Before a production rollout, verify backup and bucket retention, stop generation ingress, drain accepted work, inspect duplicate pending rows, apply the additive migration and deploy one compatible writer. Smoke no-source and source-aware clients using offline fixtures, release the client, and enable the server capability only after verification and release approval. For backout, disable new source selection/admission and keep the compatible server available for existing configurations and deletion. Preserve additive columns, indexes and snapshots. If reverting to a writer that cannot recognize continuity, keep ingress and incompatible deletions paused until compatibility is restored or live pointers and retained inputs have been explicitly reconciled. Migration tracking rows must continue to reflect the applied schema.
 
 Step 5 before step 6 is deliberate. The compiler is the interesting surface of this exercise and it is the one component that is cheap to test in isolation and expensive to debug through a live API.
 
@@ -630,7 +628,30 @@ Minimal but non-zero. Five areas justify tests in a prototype this size, as spec
 - **Prompt fidelity** — description meta-prompts and frame prompt constants remain byte-identical to the storyboard-prompt-compiler skill.
 - **Credential handling** — password hash/verify, session token generation/hashing, and Gemini key encrypt/decrypt.
 
-Ownership isolation is verified with a scripted two-account matrix against a live database, not unit tests. Everything else is exercised by using the app; do not add CRUD-handler tests.
+Verify isolation, concurrent admission, source deletion and late completion with the two-account HTTP/SQL matrix on a disposable PostgreSQL database. Stub S3, key validation, description and generation, and preload the offline transport guard before importing the app. Exercise the editor with fixture HTTP responses, including lost submissions, delayed reads and manual recovery. Any paid visual-quality trial requires separate approval of its inputs, model, account and budget. The fixture verifies request construction, state and bytes. It cannot establish real model fidelity or production bucket lifecycle behavior.
+
+The following commands run from the repository root after `npm run build`. Set `PACKAGE1_TEST_DATABASE_URL` to a dedicated loopback PostgreSQL database named `storyboards_pkg1_test`. The scripts recreate their own fixture schemas.
+
+```sh
+node server/scripts/verify-offline-network-guard.mjs
+node --import ./server/scripts/offline-network-guard.mjs server/scripts/verify-package1.mjs
+node --import ./server/scripts/offline-network-guard.mjs server/scripts/verify-package2-storage.mjs
+node --import ./server/scripts/offline-network-guard.mjs server/scripts/verify-package1-app.mjs
+node --import ./server/scripts/offline-network-guard.mjs server/scripts/verify-package1-app.mjs --continuity
+```
+
+**Package 7 server rehearsal.** On disposable PostgreSQL 17.11, the SQL fixture rolled back duplicate-pending migration failure, preserved original rows and JSON, and verified request/pending uniqueness, owner isolation and sweep/finalization races. Both HTTP modes successfully applied all migrations to a clean fixture schema. Create, GET, PATCH and generation selection returned the correct capability. Isolated imports of the compiled boot configuration confirmed that omission and `false` close the gate, `true` opens it, and `1`, `TRUE` and an empty value reject startup. With the gate closed an existing source survived rejection and zero calls were dispatched for that attempt. With it open, the matrix checked original bytes, staged copies, concurrent admissions, exact-set deletion, both lock orders, late output cleanup and isolation of one injected cleanup failure. The closed and open HTTP runs made 12 and 17 stub generation calls respectively, each with two stub key validations and one stub description. The storage matrix made 77 stub S3 calls. All reported zero real outbound calls. The transport self-test denied non-loopback TCP, TLS, HTTPS and fetch. Production schema, bucket rules, historical replay and model quality remain outside this evidence.
+
+For browser checks, build the client with `VITE_API_BASE_URL=http://mock.invalid` and serve its preview on loopback. Set `UI_ORIGIN` to the preview origin and `CHROMIUM_PATH` to the local Chromium executable. With Playwright available, run each fixture from the repository root:
+
+```sh
+node client/scripts/verify-continuity-picker.cjs
+node client/scripts/verify-editor-lifecycle.cjs
+node client/scripts/verify-legacy-frame.cjs
+```
+
+**Package 7 browser verification.** All 12 picker scenarios, the editor lifecycle matrix and all five legacy variants passed on the production build with fixture HTTP responses. Cases included enabling, disabling and omitting the capability, selecting a later frame by keyboard, saving immediately before Generate, refresh during an edit, over-budget drafts, changed and deleted source provenance, equal-count deletion reconfirmation, and explicit retry after a storage failure with zero initial dispatches. The typecheck, build and all 116 unit tests passed. The desktop and mobile fixtures verified a loaded source thumbnail and no horizontal overflow. Set `SCREENSHOT_DIR` to choose where the picker fixture writes its screenshots. [Desktop at 1280px](docs/verification/issue-14/desktop-picker.png) · [Mobile at 390px](docs/verification/issue-14/mobile-picker.png)
+
 
 ---
 

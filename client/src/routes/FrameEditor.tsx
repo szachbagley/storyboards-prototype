@@ -2,12 +2,15 @@ import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   MAX_CHARACTER_CONCEPTS,
-  MAX_TOTAL_CONCEPTS,
+  effectiveConceptLimit,
+  CONTINUITY_REFERENCE_SLOTS,
+  type FrameSummaryDto,
   type ConceptDto,
   type FrameDto,
   type GenerationSummaryDto,
 } from "@storyboards/shared";
 import { ApiError, api } from "../api.js";
+import { ContinuityPicker, sourceReady } from "../components/ContinuityPicker.js";
 import { ConfirmButton } from "../components/ConfirmButton.js";
 import { useApi } from "../hooks.js";
 import { useAuth } from "../auth.js";
@@ -20,25 +23,35 @@ type HistoryContinuity = GenerationSummaryDto["continuity"] | null | undefined;
 type CurrentSelection = Partial<Pick<FrameDto,
   "continuitySourceFrameId" | "continuitySourceSelectedGenerationId">>;
 
-function ContinuityNote({ continuity, frame }: { continuity: HistoryContinuity; frame: CurrentSelection }) {
-  const description = continuityDescription(continuity, frame);
-  return description && <p className="muted">{description}</p>;
+function ContinuityNote({ continuity, frame, frames }: {
+  continuity: HistoryContinuity; frame: CurrentSelection; frames: FrameSummaryDto[] | null;
+}) {
+  const source = continuity?.provenance === "known" ? continuity.source : null;
+  const index = frames?.findIndex(candidate => candidate.id === source?.frameId) ?? -1;
+  return <div className="provenance">
+    <p>{continuityDescription(continuity, frame)}</p>
+    {source && <details>
+      <summary>{source.sourceFrameDeleted ? "Deleted source frame" : index >= 0 ? `Source frame ${index + 1}` : "Source frame"} details</summary>
+      <p>Frame {source.frameId}<br />Image generation {source.generationId}</p>
+    </details>}
+  </div>;
 }
 
-function continuityDescription(continuity: HistoryContinuity, frame: CurrentSelection): string | null {
+function continuityDescription(continuity: HistoryContinuity, frame: CurrentSelection): string {
   if (continuity == null) return "Continuity provenance unavailable.";
   if (continuity.provenance !== "known") {
     return continuity.provenance === "legacy" ? "Continuity provenance unavailable for this legacy generation." : "Continuity provenance unknown.";
   }
   const source = continuity.source;
   if (frame.continuitySourceFrameId === undefined || frame.continuitySourceSelectedGenerationId === undefined) {
-    return source?.sourceFrameDeleted
+    if (!source) return "Generated without a continuity source. Current source selection unavailable.";
+    return source.sourceFrameDeleted
       ? "Used deleted source frame. Current source selection unavailable."
       : "Current source selection unavailable.";
   }
   const differs = (source?.frameId ?? null) !== frame.continuitySourceFrameId ||
     (source?.generationId ?? null) !== frame.continuitySourceSelectedGenerationId;
-  if (!differs) return source ? "Used current source selection." : null;
+  if (!differs) return source ? "Used current source selection." : "Generated without a continuity source.";
   const used = source?.sourceFrameDeleted ? "Used deleted source frame." :
     source ? "Used another source selection." : "Generated without a continuity source.";
   return used + " Current source selection differs; regenerate manually to use it.";
@@ -90,9 +103,19 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
   const attachedIds = new Set(attached.map(c => c.id));
   const available = (conceptsState.data ?? []).filter(c => !attachedIds.has(c.id));
   const characterCount = attached.filter(c => c.type === "character").length;
+  const sourceId = edits.source.value;
+  const enabled = frame.continuityEnabled === true;
+  const limit = effectiveConceptLimit(sourceId !== null);
+  const excessConcepts = Math.max(0, attached.length - limit);
+  const excessCharacters = Math.max(0, characterCount - MAX_CHARACTER_CONCEPTS);
+  const frameIndex = edits.sources?.findIndex(row => row.id === frameId) ?? -1;
+  const selectedSource = edits.sources?.find(row => row.id === sourceId);
+  const candidateError = edits.sourceListError ?? edits.readError;
+  const sourceBlocked = sourceId !== null && (!enabled || !!candidateError || !sourceReady(selectedSource));
   const recoveryOnly = attempt.canCheck && !attempt.canResubmit;
   const cannotGenerate = admitting || busy === "delete" || !!reviewedFrame || attempt.running ||
-    attempt.checking || attempt.submitting || recoveryOnly || !description.trim();
+    attempt.checking || attempt.submitting || recoveryOnly || !description.trim() ||
+    sourceBlocked || excessConcepts > 0 || excessCharacters > 0;
   const controlsDisabled = admitting || busy !== null;
   const isGenerating = attempt.running && !attempt.timedOut;
   const failed = attempt.generation?.status === "failed" ? attempt.generation : null;
@@ -104,6 +127,8 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
       setReviewedFrame(edits.latest.current.frame);
       edits.preserveIntent(intent);
     }
+    if (error instanceof ApiError && (error.code === "continuity_unavailable" ||
+        error.code === "continuity_source_unusable")) edits.reload();
     setActionError(message(error));
   }
 
@@ -114,6 +139,21 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
     void edits.enqueue(async () => {
       await edits.save(intent, false);
       if (edits.current()) setSaved(true);
+    }).catch(error => reportSaveError(error, intent));
+  }
+
+  function chooseSource(id: string | null) {
+    if (admissionLock.current || controlLock.current || reviewedFrame) return;
+    edits.edit("source", id);
+    setSaved(false);
+    setActionError(null);
+    const intent = edits.latest.current;
+    void edits.enqueue(async () => {
+      await edits.save(intent, false);
+      if (edits.current()) {
+        setSaved(true);
+        edits.reload();
+      }
     }).catch(error => reportSaveError(error, intent));
   }
 
@@ -144,7 +184,10 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
     setBusy(kind);
     setActionError(null);
     try {
-      await edits.enqueue(work);
+      await edits.enqueue(async () => {
+        await work();
+        if (kind !== "delete" && edits.latest.current.frame?.continuityEnabled) edits.reload();
+      });
     } catch (error) {
       if (edits.current()) setActionError(message(error));
     } finally {
@@ -211,7 +254,7 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
       <div className="spread" style={{ marginBottom: 18 }}>
         <div className="row">
           <Link to={`/stories/${storyId}`} className="back" aria-label="Back to story">‹</Link>
-          <h1>Frame</h1>
+          <h1>{frameIndex < 0 ? "Frame" : `Frame ${frameIndex + 1}`}</h1>
         </div>
         {deleteReview ? (
           <div>
@@ -259,6 +302,13 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
             <div className="frame-placeholder">Not generated yet</div>
           )}
 
+          {displayed && (
+            <section aria-label="Selected output" className="selected-output">
+              <h2>Selected output</h2>
+              <ContinuityNote continuity={displayed.continuity} frame={frame} frames={edits.sources} />
+            </section>
+          )}
+
           {failed && (
             <div className="error-banner" style={{ marginTop: 12 }}>
               <strong>{failed.errorCode === "safety_blocked" ? "Content filter" : "Generation failed"}</strong>
@@ -284,6 +334,16 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
             onChange={(e) => { edits.edit("description", e.target.value); setSaved(false); }}
             onBlur={saveOnBlur}
           />
+          {enabled ? <ContinuityPicker targetId={frameId} sourceId={sourceId} frames={edits.sources}
+            error={candidateError} disabled={controlsDisabled || !!reviewedFrame}
+            onChange={chooseSource} refresh={edits.reload} />
+          : sourceId && <p className="source-unavailable">Continuity unavailable. Current source: {sourceId}.{" "}
+              <button type="button" className="btn btn-small" disabled={controlsDisabled || !!reviewedFrame}
+                onClick={() => chooseSource(null)}>Clear source</button>
+            </p>}
+          {edits.source.dirty && actionError && !reviewedFrame &&
+            <button type="button" className="btn btn-small" disabled={controlsDisabled}
+              onClick={() => chooseSource(sourceId)}>Retry source save</button>}
           <div className="row" style={{ marginTop: 10 }}>
             <button className="btn btn-primary" type="button" disabled={cannotGenerate} onClick={onGenerate}>
               {attempt.canResubmit ? "Resubmit request" : isGenerating ? "Generating…" : "Generate frame"}
@@ -291,26 +351,32 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
             {!description.trim() && <span className="muted">A description is required.</span>}
           </div>
 
+          {sourceBlocked && <p className="warn">Choose a source with a ready selected image or clear the source before generating.</p>}
+          {excessConcepts > 0 && <p className="warn">Remove {excessConcepts} concept{excessConcepts === 1 ? "" : "s"} to generate with these source settings.</p>}
+          {excessCharacters > 0 && <p className="warn">Remove {excessCharacters} character concept{excessCharacters === 1 ? "" : "s"} before generating.</p>}
+
           {frame.generations.length > 0 && (
             <>
               <h2 style={{ marginTop: 24 }}>History</h2>
-              <div className="history">
+              <div className="history" role="region" aria-label="Generation history">
                 {frame.generations.map((g) => (
                   <div key={g.id}>
                     <button
                       type="button"
                       className={`history-item${g.id === frame.selectedGenerationId ? " history-selected" : ""}`}
                       disabled={controlsDisabled || g.status !== "succeeded"}
+                      aria-label={`Generation ${g.id}, ${g.status}`}
+                      aria-pressed={g.id === frame.selectedGenerationId}
                       title={g.status === "succeeded" ? "Use this generation" : (g.errorCode ?? g.status)}
                       onClick={() => void onSelect(g.id)}
                     >
                       {g.imageUrl ? (
                         <img className="history-thumb" src={g.imageUrl} alt="Previous generation" />
                       ) : (
-                        <div className="history-failed">{g.status === "pending" ? "…" : (g.errorCode ?? "failed")}</div>
+                        <div className="history-failed">{g.status === "succeeded" ? "Image unavailable" : (g.errorCode ?? g.status)}</div>
                       )}
                     </button>
-                    <ContinuityNote continuity={g.continuity} frame={frame} />
+                    <ContinuityNote continuity={g.continuity} frame={frame} frames={edits.sources} />
                   </div>
                 ))}
               </div>
@@ -324,13 +390,14 @@ function FrameEditorSession({ userId, storyId, frameId }: { userId: string; stor
           {/* section 8.3: surface remaining character slots rather than letting a
               user attach nine and receive slop. */}
           <p className="budget">
-            <span className={characterCount >= MAX_CHARACTER_CONCEPTS ? "budget-full" : ""}>
+            <span className={characterCount > MAX_CHARACTER_CONCEPTS ? "budget-full" : ""}>
               Characters {characterCount} / {MAX_CHARACTER_CONCEPTS}
             </span>
             {" · "}
-            <span className={attached.length >= MAX_TOTAL_CONCEPTS ? "budget-full" : ""}>
-              Total {attached.length} / {MAX_TOTAL_CONCEPTS}
+            <span className={attached.length > limit ? "budget-full" : ""}>
+              Concepts {attached.length} / {limit}
             </span>
+            {" · "}Continuity slots {sourceId ? CONTINUITY_REFERENCE_SLOTS : 0} / {CONTINUITY_REFERENCE_SLOTS}
           </p>
 
           {attached.length === 0 ? (

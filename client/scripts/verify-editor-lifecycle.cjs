@@ -28,6 +28,12 @@ const otherGenerationId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 const frame = (id = 'a') => ({ id, storyId: 'story', position: 1, description: 'Original scene',
   continuitySourceFrameId: null, continuitySourceSelectedGenerationId: null, continuityReferencedByCount: 0,
   selectedImageState: 'none', selectedGenerationId: null, imageUrl: null, concepts: [], generations: [] });
+const enableSources = state => {
+  state.frames.a.continuityEnabled = true;
+  for (const id of [sourceA, sourceB]) {
+    state.frames[id] = { ...frame(id), selectedImageState: 'ready', selectedGenerationId: otherGenerationId };
+  }
+};
 const generation = (id, status = 'pending') => ({ id, status, imageUrl: null, errorCode: null,
   errorMessage: null, continuity: { provenance: 'known', source: null }, createdAt: '2026-01-01T00:00:00Z', completedAt: null });
 
@@ -363,6 +369,7 @@ async function main() {
     });
     await run('server source refresh is reasserted in final save and submission', async () => {
       const f = await fixture(browser), { page, state } = f;
+      enableSources(state);
       state.frames.a.continuitySourceFrameId = sourceA;
       state.pollStatus = 'pending';
       await f.open('a');
@@ -381,6 +388,7 @@ async function main() {
     });
     await run('configuration conflict requires review and explicit new submission', async () => {
       const f = await fixture(browser), { page, state } = f;
+      enableSources(state);
       state.frames.a.continuitySourceFrameId = sourceA;
       state.postMode = 'config409';
       await f.open('a');
@@ -437,6 +445,7 @@ async function main() {
     await run('late original admission wins explicit same-token resubmission', async () => {
       const f = await fixture(browser);
       const { page, state } = f;
+      enableSources(state);
       state.frames.a.continuitySourceFrameId = sourceA;
       state.postMode = 'lost-never';
       await f.open('a');

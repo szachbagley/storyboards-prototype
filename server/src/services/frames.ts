@@ -52,7 +52,7 @@ async function conceptToDto(row: AttachedConceptRow): Promise<ConceptDto> {
   };
 }
 
-async function toFrameDto(row: FrameRow, userId: string): Promise<FrameDto> {
+async function toFrameDto(row: FrameRow, userId: string, continuityEnabled: boolean): Promise<FrameDto> {
   // listFrameConcepts orders by ord, and that order is preserved straight
   // through into the DTO array -- invariant 5 depends on it.
   const [summary, conceptRows, generationRows] = await Promise.all([
@@ -62,6 +62,7 @@ async function toFrameDto(row: FrameRow, userId: string): Promise<FrameDto> {
   ]);
   return {
     ...summary,
+    continuityEnabled,
     concepts: await Promise.all(conceptRows.map(conceptToDto)),
     generations: await Promise.all(generationRows.map((row) => generationToDto(row, userId))),
   };
@@ -76,13 +77,13 @@ export async function listStoryFrames(storyId: string, userId: string): Promise<
   return Promise.all((await framesDb.listFramesByStory(storyId, userId)).map(toSummary));
 }
 
-export async function getFrame(id: string, userId: string): Promise<FrameDto> {
+export async function getFrame(id: string, userId: string, continuityEnabled: boolean): Promise<FrameDto> {
   const row = await framesDb.getFrameById(id, userId);
   if (!row) throw frameNotFound(id);
-  return toFrameDto(row, userId);
+  return toFrameDto(row, userId, continuityEnabled);
 }
 
-export async function createFrame(storyId: string, userId: string, body: CreateFrameBody): Promise<FrameDto> {
+export async function createFrame(storyId: string, userId: string, body: CreateFrameBody, continuityEnabled: boolean): Promise<FrameDto> {
   // Reading max(position) and inserting must not interleave with another
   // append, or two frames land on the same position.
   const id = await withTransaction(async (client) => {
@@ -94,7 +95,7 @@ export async function createFrame(storyId: string, userId: string, body: CreateF
   });
   if (!id) throw new AppError(404, "not_found", `No story with id ${storyId}`);
 
-  return getFrame(id, userId);
+  return getFrame(id, userId, continuityEnabled);
 }
 
 function invalidSource() {
@@ -144,7 +145,7 @@ export async function updateFrame(id: string, userId: string, body: UpdateFrameB
     throw error;
   });
 
-  return getFrame(id, userId);
+  return getFrame(id, userId, continuityEnabled);
 }
 
 export async function deleteFrame(id: string, userId: string, query: DeleteFrameQuery): Promise<void> {

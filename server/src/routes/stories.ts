@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { CreateFrameSchema, CreateStorySchema, UpdateStorySchema, UuidParamSchema } from "@storyboards/shared";
+import { CreateStorySchema, UpdateStorySchema, UuidParamSchema } from "@storyboards/shared";
 import { requireUser } from "../middleware/auth.js";
 import * as frames from "../services/frames.js";
 import * as stories from "../services/stories.js";
@@ -34,9 +34,4 @@ storiesRouter.delete("/stories/:id", async (req, res) => {
 storiesRouter.get("/stories/:id/frames", async (req, res) => {
   const { id } = UuidParamSchema.parse(req.params);
   res.json(await frames.listStoryFrames(id, requireUser(req).id));
-});
-
-storiesRouter.post("/stories/:id/frames", async (req, res) => {
-  const { id } = UuidParamSchema.parse(req.params);
-  res.status(201).json(await frames.createFrame(id, requireUser(req).id, CreateFrameSchema.parse(req.body)));
 });

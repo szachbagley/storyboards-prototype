@@ -3,7 +3,7 @@ import { env } from "./config/env.js";
 import { pool } from "./db/pool.js";
 import { startSweeper } from "./services/sweep.js";
 
-const app = createApp();
+const app = createApp({ continuityEnabled: env.CONTINUITY_ENABLED });
 
 const server = app.listen(env.PORT, () => {
   console.log(`[server] listening on :${env.PORT} (${env.NODE_ENV})`);
