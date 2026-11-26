@@ -13,6 +13,7 @@ export interface GenerationDetailRow {
   errorMessage: string | null;
   createdAt: Date;
   completedAt: Date | null;
+  inputSnapshot: unknown;
 }
 
 // Ownership runs generation -> frame -> story -> user. Reads and user-initiated
@@ -22,7 +23,7 @@ export interface GenerationDetailRow {
 export async function getGenerationById(
   id: string, userId: string, client?: pg.PoolClient,
 ): Promise<GenerationDetailRow | null> {
-  const sql = `SELECT g.id,
+  const sql = `SELECT g.id, g.input_snapshot AS "inputSnapshot",
             g.frame_id      AS "frameId",
             g.status,
             g.image_key     AS "imageKey",
@@ -112,14 +113,22 @@ export async function insertPending(
   input: { id: string; frameId: string; requestId: string | null; model: string;
     compiledPrompt: string; inputSnapshot: GenerationInputSnapshotV2 },
 ): Promise<string> {
-  const { rows } = await client.query<{ id: string }>(
+  const { rows } = await client.query<{ transactionId: string }>(
     `INSERT INTO generations (id, frame_id, request_id, status, model, compiled_prompt, input_snapshot)
      VALUES ($1, $2, $3, 'pending', $4, $5, $6)
-     RETURNING id`,
+     RETURNING pg_current_xact_id()::text AS "transactionId"`,
     [input.id, input.frameId, input.requestId, input.model,
       input.compiledPrompt, JSON.stringify(input.inputSnapshot)],
   );
-  return rows[0]!.id;
+  return rows[0]!.transactionId;
+}
+
+/** A row can still be invisible while COMMIT is resolving. Only the database's
+ * terminal aborted status for this exact transaction proves rollback. */
+export async function admissionRolledBack(transactionId: string): Promise<boolean> {
+  const { rows } = await query<{ status: string | null }>(
+    "SELECT pg_xact_status($1::xid8) AS status", [transactionId]);
+  return rows[0]?.status === "aborted";
 }
 
 /** Returns false when the row no longer exists -- the frame or story was

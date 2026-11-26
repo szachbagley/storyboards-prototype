@@ -4,37 +4,46 @@ import { requireUser } from "../middleware/auth.js";
 import * as frames from "../services/frames.js";
 import * as generation from "../services/generation.js";
 
-export const framesRouter: Router = Router();
+export function createFramesRouter(continuityEnabled: boolean): Router {
+  const framesRouter = Router();
 
-framesRouter.get("/frames/:id", async (req, res) => {
-  const { id } = UuidParamSchema.parse(req.params);
-  res.json(await frames.getFrame(id, requireUser(req).id));
-});
+  framesRouter.get("/frames/:id", async (req, res) => {
+    const { id } = UuidParamSchema.parse(req.params);
+    res.json(await frames.getFrame(id, requireUser(req).id));
+  });
 
-framesRouter.patch("/frames/:id", async (req, res) => {
-  const { id } = UuidParamSchema.parse(req.params);
-  res.json(await frames.updateFrame(id, requireUser(req).id, UpdateFrameSchema.parse(req.body)));
-});
+  framesRouter.patch("/frames/:id", async (req, res) => {
+    const { id } = UuidParamSchema.parse(req.params);
+    res.json(await frames.updateFrame(id, requireUser(req).id, UpdateFrameSchema.parse(req.body), continuityEnabled));
+  });
 
-// Returns 202 immediately; the model call runs in the background and the
-// client polls GET /generations/:id. The whole user is passed, not just the id,
-// because the generation is billed to their own Gemini key.
-framesRouter.post("/frames/:id/generate", async (req, res) => {
-  const { id } = UuidParamSchema.parse(req.params);
-  const body = GenerateFrameSchema.parse(req.body === undefined ? {} : req.body);
-  res.status(202).json({ generationId: await generation.startGeneration(id, requireUser(req), body) });
-});
+  framesRouter.get("/frames/:id/generation-requests/:requestId", async (req, res) => {
+    const { id } = UuidParamSchema.parse(req.params);
+    const { id: requestId } = UuidParamSchema.parse({ id: req.params.requestId });
+    res.json({ generationId: await generation.lookupRequest(id, requestId, requireUser(req).id) });
+  });
 
-framesRouter.post("/frames/:id/select-generation", async (req, res) => {
-  const { id } = UuidParamSchema.parse(req.params);
-  const { generationId } = SelectGenerationSchema.parse(req.body);
-  const userId = requireUser(req).id;
-  await generation.selectGeneration(id, generationId, userId);
-  res.json(await frames.getFrame(id, userId));
-});
+  // Returns 202 immediately; the model call runs in the background and the
+  // client polls GET /generations/:id. The whole user is passed, not just the id,
+  // because the generation is billed to their own Gemini key.
+  framesRouter.post("/frames/:id/generate", async (req, res) => {
+    const { id } = UuidParamSchema.parse(req.params);
+    const body = GenerateFrameSchema.parse(req.body === undefined ? {} : req.body);
+    res.status(202).json({ generationId: await generation.startGeneration(id, requireUser(req), body, continuityEnabled) });
+  });
 
-framesRouter.delete("/frames/:id", async (req, res) => {
-  const { id } = UuidParamSchema.parse(req.params);
-  await frames.deleteFrame(id, requireUser(req).id);
-  res.status(204).end();
-});
+  framesRouter.post("/frames/:id/select-generation", async (req, res) => {
+    const { id } = UuidParamSchema.parse(req.params);
+    const { generationId } = SelectGenerationSchema.parse(req.body);
+    const userId = requireUser(req).id;
+    await generation.selectGeneration(id, generationId, userId);
+    res.json(await frames.getFrame(id, userId));
+  });
+
+  framesRouter.delete("/frames/:id", async (req, res) => {
+    const { id } = UuidParamSchema.parse(req.params);
+    await frames.deleteFrame(id, requireUser(req).id);
+    res.status(204).end();
+  });
+  return framesRouter;
+}

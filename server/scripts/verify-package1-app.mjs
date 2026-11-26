@@ -66,6 +66,7 @@ const { createApp } = await import("../dist/app.js");
 const { pool } = await import("../dist/db/pool.js");
 const { sweepStale } = await import("../dist/db/generations.js");
 let commitFault = null;
+let unavailableDisposition = false;
 let rollbackFault = false;
 let faultedClient = null;
 let recoveryReads = 0;
@@ -91,6 +92,12 @@ pg.Client.prototype.query = function (...args) {
       throw error;
     });
   }
+  if (unavailableDisposition && typeof args[0] === "string" && args[0].includes("pg_xact_status")) {
+    unavailableDisposition = false;
+    assert.notEqual(this, faultedClient);
+    // Preserve pg's promise/callback calling convention while forcing a real SQL error.
+    return originalPgQuery.call(this, "SELECT 1 / 0 WHERE $1::text IS NOT NULL", ...args.slice(1));
+  }
   if (args[0] === "ROLLBACK" && rollbackFault) {
     rollbackFault = false;
     return Promise.reject(new Error("fixture: rollback failed"));
@@ -105,6 +112,7 @@ pg.Client.prototype.query = function (...args) {
     commitFault = null;
     faultedClient = this;
     recoveryReads = 0;
+    if (fault === "unresolved") unavailableDisposition = true;
     if (fault === "rollback_failure") rollbackFault = true;
     if (fault !== "after") return Promise.reject(new Error("fixture: COMMIT not sent"));
     return Promise.resolve(originalPgQuery.apply(this, args)).then(() => {
@@ -113,7 +121,8 @@ pg.Client.prototype.query = function (...args) {
   }
   return originalPgQuery.apply(this, args);
 };
-const server = createApp().listen(0, "127.0.0.1");
+const continuityEnabled = process.argv.includes("--continuity");
+const server = createApp({ continuityEnabled }).listen(0, "127.0.0.1");
 await new Promise((resolve) => server.once("listening", resolve));
 const base = `http://127.0.0.1:${server.address().port}/api`;
 const request = async (method, path, token, body, expected) => {
@@ -191,6 +200,7 @@ try {
   assert.equal(state.calls.generate, 1);
   const detail = await request("GET", `/frames/${frame.id}`, a.token, undefined, 200);
   const poll = await request("GET", `/generations/${started.generationId}`, a.token, undefined, 200);
+  assert.deepEqual(poll.continuity, { provenance: "known", source: null });
   for (const dto of [detail, poll]) {
     const serialized = JSON.stringify(dto);
     assert.equal(serialized.includes("inputSnapshot"), false);
@@ -299,7 +309,7 @@ try {
   const source = await request("POST", `/stories/${storyA.id}/frames`, a.token,
     { description: "source" }, 201);
   await request("PATCH", `/frames/${frame.id}`, a.token,
-    { continuitySourceFrameId: source.id }, 422);
+    { continuitySourceFrameId: source.id }, continuityEnabled ? 200 : 422);
   await db.query("UPDATE frames SET continuity_source_frame_id = $1 WHERE id = $2",
     [source.id, frame.id]);
   const priorCalls = state.calls.generate;
@@ -313,7 +323,7 @@ try {
   const tied = (await request("GET", `/stories/${storyA.id}/frames`, a.token, undefined, 200))
     .filter((item) => item.position === 500).map((item) => item.id);
   assert.deepEqual(tied, [frame.id, source.id].sort());
-  console.log("offline app: partial rollout refuses source configuration and dispatch");
+  console.log("offline app: source configuration gate and unusable source rejection passed");
 
   const invalid = new Error("fixture rejected");
   invalid.status = 401;
@@ -407,6 +417,11 @@ try {
   assert.equal(state.objects.has(storedKey), false);
   console.log("offline app: story deletion collected committed output under the story lock");
 
+  if (continuityEnabled) {
+    const { verifyContinuity } = await import("./verify-continuity-cases.mjs");
+    await verifyContinuity({ db, state, request, a, b, storyA, other, gate, waitFor, status,
+      injectAdmissionFault: (fault) => { commitFault = fault; } });
+  }
   assert.equal(globalThis.__package1Outbound.blocked, 0);
   console.log(`offline app: stub dispatches generate=${state.calls.generate}, validate=${state.calls.validate}, describe=${state.calls.describe}; real outbound=0`);
 } finally {

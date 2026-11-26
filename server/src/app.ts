@@ -6,12 +6,12 @@ import { errorHandler } from "./middleware/errorHandler.js";
 import { requestLogger } from "./middleware/requestLogger.js";
 import { authRouter } from "./routes/auth.js";
 import { conceptsRouter } from "./routes/concepts.js";
-import { framesRouter } from "./routes/frames.js";
+import { createFramesRouter } from "./routes/frames.js";
 import { generationsRouter } from "./routes/generations.js";
 import { healthRouter } from "./routes/health.js";
 import { storiesRouter } from "./routes/stories.js";
 
-export function createApp(): express.Express {
+export function createApp({ continuityEnabled = false } = {}): express.Express {
   const app = express();
 
   // Permissive origin is safe here specifically because authentication is a
@@ -32,7 +32,7 @@ export function createApp(): express.Express {
 
   app.use("/api", conceptsRouter);
   app.use("/api", storiesRouter);
-  app.use("/api", framesRouter);
+  app.use("/api", createFramesRouter(continuityEnabled));
   app.use("/api", generationsRouter);
 
   app.use((req, _res, next) => {

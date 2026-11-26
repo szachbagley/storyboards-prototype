@@ -4,14 +4,15 @@ import {
   type CreateFrameBody,
   type FrameDto,
   type FrameSummaryDto,
-  type GenerationSummaryDto,
   type UpdateFrameBody,
 } from "@storyboards/shared";
 import * as framesDb from "../db/frames.js";
 import * as generationsDb from "../db/generations.js";
-import type { AttachedConceptRow, FrameRow, GenerationRow } from "../db/frames.js";
+import type { AttachedConceptRow, FrameRow } from "../db/frames.js";
 import { withTransaction } from "../db/pool.js";
 import * as storiesDb from "../db/stories.js";
+import { generationToDto } from "./generationProjection.js";
+import { requireContinuityRollout } from "./continuityRollout.js";
 import { AppError } from "../lib/AppError.js";
 import { deleteObject, getPresignedUrl } from "./s3.js";
 
@@ -25,6 +26,10 @@ async function toSummary(row: FrameRow): Promise<FrameSummaryDto> {
     storyId: row.storyId,
     position: row.position,
     description: row.description,
+    continuitySourceFrameId: row.continuitySourceFrameId,
+    continuitySourceSelectedGenerationId: row.continuitySourceSelectedGenerationId,
+    continuityReferencedByCount: row.continuityReferencedByCount,
+    selectedImageState: row.selectedImageState,
     selectedGenerationId: row.selectedGenerationId,
     imageUrl: row.selectedImageKey ? await getPresignedUrl(row.selectedImageKey) : null,
     createdAt: row.createdAt.toISOString(),
@@ -45,18 +50,6 @@ async function conceptToDto(row: AttachedConceptRow): Promise<ConceptDto> {
   };
 }
 
-async function generationToDto(row: GenerationRow): Promise<GenerationSummaryDto> {
-  return {
-    id: row.id,
-    status: row.status,
-    imageUrl: row.imageKey ? await getPresignedUrl(row.imageKey) : null,
-    errorCode: row.errorCode,
-    errorMessage: row.errorMessage,
-    createdAt: row.createdAt.toISOString(),
-    completedAt: row.completedAt?.toISOString() ?? null,
-  };
-}
-
 async function toFrameDto(row: FrameRow, userId: string): Promise<FrameDto> {
   // listFrameConcepts orders by ord, and that order is preserved straight
   // through into the DTO array -- invariant 5 depends on it.
@@ -68,7 +61,7 @@ async function toFrameDto(row: FrameRow, userId: string): Promise<FrameDto> {
   return {
     ...summary,
     concepts: await Promise.all(conceptRows.map(conceptToDto)),
-    generations: await Promise.all(generationRows.map(generationToDto)),
+    generations: await Promise.all(generationRows.map((row) => generationToDto(row, userId))),
   };
 }
 
@@ -102,16 +95,23 @@ export async function createFrame(storyId: string, userId: string, body: CreateF
   return getFrame(id, userId);
 }
 
-export async function updateFrame(id: string, userId: string, body: UpdateFrameBody): Promise<FrameDto> {
+function invalidSource() {
+  return new AppError(422, "invalid_continuity_source", "Choose another frame in this story.");
+}
+
+export async function updateFrame(id: string, userId: string, body: UpdateFrameBody, continuityEnabled = false): Promise<FrameDto> {
   const storyId = await framesDb.getOwnedFrameStoryId(id, userId);
   if (!storyId) throw frameNotFound(id);
   await withTransaction(async (client) => {
     if (!(await storiesDb.lockStoryForUpdate(client, storyId, userId)) ||
         !(await framesDb.lockOwnedFrameForUpdate(client, id, storyId, userId))) throw frameNotFound(id);
-    // The schema is additive, but enabling a non-null source before the
-    // compiler/storage packages would silently generate without continuity.
-    if (body.continuitySourceFrameId) {
-      throw new AppError(422, "continuity_unavailable", "Source-frame continuity is not available yet.");
+    const sourceId = body.continuitySourceFrameId;
+    if (sourceId) {
+      if (sourceId.toLowerCase() === id.toLowerCase() ||
+          !await framesDb.lockOwnedSource(client, sourceId, storyId, userId)) {
+        throw invalidSource();
+      }
+      requireContinuityRollout(continuityEnabled);
     }
     const updated = await framesDb.updateFrameFields(client, id, userId, {
       ...(body.description !== undefined ? { description: body.description } : {}),
@@ -136,6 +136,10 @@ export async function updateFrame(id: string, userId: string, body: UpdateFrameB
       }
       await framesDb.replaceFrameConcepts(client, id, body.conceptIds, userId);
     }
+  }).catch((error: unknown) => {
+    const pgError = error as { code?: string; constraint?: string } | null;
+    if (pgError?.code === "23503" && pgError.constraint === "frames_continuity_source_fk") throw invalidSource();
+    throw error;
   });
 
   return getFrame(id, userId);

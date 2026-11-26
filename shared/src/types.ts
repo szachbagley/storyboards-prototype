@@ -75,6 +75,10 @@ export interface FrameSummaryDto {
   storyId: string;
   position: number;
   description: string;
+  continuitySourceFrameId: string | null;
+  continuitySourceSelectedGenerationId: string | null;
+  continuityReferencedByCount: number;
+  selectedImageState: "none" | "pending" | "failed" | "invalid" | "ready";
   selectedGenerationId: string | null;
   imageUrl: string | null;
   createdAt: string;
@@ -82,6 +86,9 @@ export interface FrameSummaryDto {
 }
 
 export interface GenerationSummaryDto {
+  continuity: { provenance: "legacy" | "unknown" } | { provenance: "known"; source: null | {
+    frameId: string; generationId: string; sourceFrameDeleted: boolean;
+  } };
   id: string;
   status: GenerationStatus;
   imageUrl: string | null;

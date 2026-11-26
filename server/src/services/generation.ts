@@ -6,7 +6,10 @@ import {
 import * as framesDb from "../db/frames.js";
 import * as generationsDb from "../db/generations.js";
 import * as storiesDb from "../db/stories.js";
-import type { GenerationDetailRow } from "../db/generations.js";
+import { generationToDto } from "./generationProjection.js";
+import { requireContinuityRollout } from "./continuityRollout.js";
+import { withReferencePreflight, readConceptReferenceBytes, stageContinuityCopy,
+  cleanupKnownUncommittedContinuityCopy } from "./referencePreflight.js";
 import { withTransaction } from "../db/pool.js";
 import { AppError } from "../lib/AppError.js";
 import { generateImage } from "./gemini.js";
@@ -15,24 +18,18 @@ import type { AuthUser } from "../middleware/auth.js";
 import { compileFramePrompt, validateFrameForGeneration, type CompilerConcept } from "./promptCompiler.js";
 import type { GenerationInputSnapshotV2 } from "./generationSnapshot.js";
 import { resolveUserApiKey } from "./userApiKey.js";
-import { deleteObject, generationImageKey, getObjectBytes, getPresignedUrl, putObject } from "./s3.js";
+import { deleteObject, generationImageKey, putObject } from "./s3.js";
 
-async function toDto(row: GenerationDetailRow): Promise<GenerationSummaryDto> {
-  return {
-    id: row.id,
-    status: row.status,
-    imageUrl: row.imageKey ? await getPresignedUrl(row.imageKey) : null,
-    errorCode: row.errorCode,
-    errorMessage: row.errorMessage,
-    createdAt: row.createdAt.toISOString(),
-    completedAt: row.completedAt?.toISOString() ?? null,
-  };
+export async function lookupRequest(frameId: string, requestId: string, userId: string): Promise<string> {
+  const row = await generationsDb.getGenerationByRequest(frameId, requestId, userId);
+  if (!row) throw new AppError(404, "not_found", "No generation request for this frame.");
+  return row.id;
 }
 
 export async function getGeneration(id: string, userId: string): Promise<GenerationSummaryDto> {
   const row = await generationsDb.getGenerationById(id, userId);
   if (!row) throw new AppError(404, "not_found", `No generation with id ${id}`);
-  return toDto(row);
+  return generationToDto(row, userId);
 }
 
 function frameNotFound(frameId: string): AppError {
@@ -58,10 +55,8 @@ function hash(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-/** Package 1 writes V2 for no-source attempts. A configured source is rejected
- * until storage, compiler, and admission support ship together in Package 4. */
 export async function startGeneration(
-  frameId: string, user: AuthUser, body: GenerateFrameBody = {},
+  frameId: string, user: AuthUser, body: GenerateFrameBody = {}, continuityEnabled = false,
 ): Promise<string> {
   const ownedStoryId = await framesDb.getOwnedFrameStoryId(frameId, user.id);
   if (!ownedStoryId) throw frameNotFound(frameId);
@@ -79,56 +74,77 @@ export async function startGeneration(
     const prior = await generationsDb.getGenerationByRequest(frameId, body.requestId, user.id);
     if (prior) return prior.id;
   }
-  const fastPending = await generationsDb.findPendingForFrame(frameId, user.id);
-  if (fastPending) {
-    if (body.requestId && fastPending.requestId === body.requestId) return fastPending.id;
-    throw pendingError(fastPending.id);
-  }
   if (body.expectedContinuitySourceFrameId !== undefined &&
-      body.expectedContinuitySourceFrameId !== captured.continuitySourceFrameId) {
+      (body.expectedContinuitySourceFrameId?.toLowerCase() ?? null) !== captured.continuitySourceFrameId) {
     throw new AppError(409, "continuity_configuration_changed", "The source frame changed. Refresh and review it.");
   }
   if (captured.continuitySourceFrameId !== null) {
-    throw new AppError(422, "continuity_unavailable", "Source-frame continuity is not available yet.");
+    requireContinuityRollout(continuityEnabled);
+    if (captured.sourceId !== captured.continuitySourceFrameId) {
+      throw new AppError(422, "invalid_continuity_source", "Choose another frame in this story.");
+    }
+    if (!captured.source) {
+      throw new AppError(422, "continuity_source_unusable", "Select a succeeded image on the source frame.");
+    }
   }
 
   const conceptsForValidation: CompilerConcept[] = captured.concepts.map((concept) => ({
     id: concept.id, name: concept.name, type: concept.type, description: concept.description,
     imageBase64: null, imageMimeType: concept.imageMime,
   }));
-  validateFrameForGeneration({ frameDescription: captured.frameDescription, concepts: conceptsForValidation });
-
-  // The single SQL capture fixes metadata order. Concept keys remain mutable
-  // in this prototype, as the plan records.
-  const buffers = await Promise.all(captured.concepts.map((concept) =>
-    concept.imageKey ? getObjectBytes(concept.imageKey) : Promise.resolve(null)));
-  const concepts: CompilerConcept[] = captured.concepts.map((concept, index) => ({
-    id: concept.id, name: concept.name, type: concept.type, description: concept.description,
-    imageBase64: buffers[index]?.toString("base64") ?? null, imageMimeType: concept.imageMime,
-  }));
-  const { prompt, parts } = compileFramePrompt({ frameDescription: captured.frameDescription, concepts });
-  const inputSnapshot: GenerationInputSnapshotV2 = {
-    schemaVersion: 2,
-    compilerVersion: "explicit-continuity-v1",
-    capturedAt: captured.capturedAt.toISOString(),
-    frameDescription: captured.frameDescription,
-    aspectRatio: ASPECT_RATIO,
-    imageSize: IMAGE_SIZE,
-    concepts: captured.concepts.map((concept, index) => ({
-      id: concept.id, ord: concept.ord, name: concept.name, type: concept.type,
-      description: concept.description, imageKey: concept.imageKey,
-      imageMime: concept.imageKey ? (concept.imageMime ?? IMAGE_MIME_TYPE) : null,
-      imageSha256: buffers[index] ? hash(buffers[index]) : null,
-    })),
-    continuity: null,
-  };
+  validateFrameForGeneration({
+    frameDescription: captured.frameDescription, concepts: conceptsForValidation,
+    continuity: captured.source ? { imageBase64: "", imageMimeType: IMAGE_MIME_TYPE } : null,
+  });
+  const fastPending = await generationsDb.findPendingForFrame(frameId, user.id);
+  if (fastPending) {
+    if (body.requestId && fastPending.requestId === body.requestId.toLowerCase()) return fastPending.id;
+    throw pendingError(fastPending.id);
+  }
 
   const candidateId = randomUUID();
-  let admission: { id: string; inserted: boolean };
+  let ownsCopy = false;
+  let admissionTransactionId: string | undefined;
+  let confirmedRollback = false;
   let insertAttempted = false;
   let replayDuringAdmission: string | null = null;
   try {
-    admission = await withTransaction(async (client) => {
+    const { buffers, copy } = await withReferencePreflight(async (budget) => {
+      const buffers = await readConceptReferenceBytes(captured.concepts.map((c) => c.imageKey), budget);
+      const copy = captured.source ? await stageContinuityCopy(candidateId, captured.source.imageKey, budget) : null;
+      ownsCopy = copy !== null;
+      return { buffers, copy };
+    });
+    const concepts: CompilerConcept[] = captured.concepts.map((concept, index) => ({
+      id: concept.id, name: concept.name, type: concept.type, description: concept.description,
+      imageBase64: buffers[index]?.toString("base64") ?? null, imageMimeType: concept.imageMime,
+    }));
+    const { prompt, parts } = compileFramePrompt({
+      frameDescription: captured.frameDescription, concepts,
+      continuity: copy && { imageBase64: copy.imageBytes.toString("base64"), imageMimeType: copy.imageMime },
+    });
+    const inputSnapshot: GenerationInputSnapshotV2 = {
+      schemaVersion: 2,
+      compilerVersion: "explicit-continuity-v1",
+      capturedAt: captured.capturedAt.toISOString(),
+      frameDescription: captured.frameDescription,
+      aspectRatio: ASPECT_RATIO,
+      imageSize: IMAGE_SIZE,
+      concepts: captured.concepts.map((concept, index) => ({
+        id: concept.id, ord: concept.ord, name: concept.name, type: concept.type,
+        description: concept.description, imageKey: concept.imageKey,
+        imageMime: concept.imageKey ? (concept.imageMime ?? IMAGE_MIME_TYPE) : null,
+        imageSha256: buffers[index] ? hash(buffers[index]) : null,
+      })),
+      continuity: captured.source && copy ? {
+        sourceFrameId: captured.source.frameId, sourceGenerationId: captured.source.generationId,
+        sourcePosition: captured.source.position, sourceImageKey: captured.source.imageKey,
+        sourceImageSha256: copy.sourceImageSha256, imageKey: copy.imageKey,
+        imageSha256: copy.imageSha256, imageMime: copy.imageMime,
+      } : null,
+    };
+
+    const admission = await withTransaction(async (client) => {
       if (!(await storiesDb.lockStoryForUpdate(client, captured.storyId, user.id)) ||
           !(await framesDb.lockOwnedFrameForUpdate(client, frameId, captured.storyId, user.id))) {
         throw frameNotFound(frameId);
@@ -143,12 +159,17 @@ export async function startGeneration(
       const pending = await generationsDb.getPendingForFrame(client, frameId, user.id);
       if (pending) throw pendingError(pending.id);
       insertAttempted = true;
-      await generationsDb.insertPending(client, {
+      admissionTransactionId = await generationsDb.insertPending(client, {
         id: candidateId, frameId, requestId: body.requestId ?? null,
         model: IMAGE_MODEL, compiledPrompt: prompt, inputSnapshot,
       });
       return { id: candidateId, inserted: true };
     });
+    if (!admission.inserted) return admission.id;
+    void runGeneration(admission.id, frameId, captured.storyId, apiKey, parts).catch((err: unknown) => {
+      console.error(`[generation] ${admission.id} escaped its own error handling`, err);
+    });
+    return admission.id;
   } catch (err) {
     // The transaction helper rolls back first. A lost COMMIT acknowledgement
     // must never trigger another dispatch.
@@ -163,6 +184,13 @@ export async function startGeneration(
     if (candidateState) {
       throw new AppError(503, "admission_uncertain", "Generation was recorded but dispatch could not be confirmed.",
         { generationId: candidateId });
+    }
+    if (admissionTransactionId !== undefined) {
+      if (ownsCopy) {
+        confirmedRollback = await generationsDb.admissionRolledBack(admissionTransactionId).catch(() => false);
+      }
+      throw new AppError(503, "admission_uncertain",
+        "Generation admission could not be confirmed. Check the frame before retrying.");
     }
     const constraint = admissionConflictName(err);
     if (constraint) {
@@ -179,13 +207,14 @@ export async function startGeneration(
         "Generation admission changed while this request was being saved. Check the frame before retrying.");
     }
     throw err;
+  } finally {
+    // A lost COMMIT acknowledgement after INSERT may still leave a committed row.
+    // An ambiguous PUT never established ownership of its key.
+    if (ownsCopy && (admissionTransactionId === undefined || confirmedRollback)) {
+      await cleanupKnownUncommittedContinuityCopy(candidateId).catch(() =>
+        console.error(`[generation] ${candidateId} could not clean up its staged input`));
+    }
   }
-
-  if (!admission.inserted) return admission.id;
-  void runGeneration(admission.id, frameId, captured.storyId, apiKey, parts).catch((err: unknown) => {
-    console.error(`[generation] ${admission.id} escaped its own error handling`, err);
-  });
-  return admission.id;
 }
 
 function isGenerationErrorCode(code: string): code is GenerationErrorCode {

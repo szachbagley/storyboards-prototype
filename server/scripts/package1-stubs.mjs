@@ -10,8 +10,9 @@ export async function describeImage() {
   state.calls.describe += 1;
   return "Fixture description";
 }
-export async function generateImage() {
+export async function generateImage(_key, parts) {
   state.calls.generate += 1;
+  state.lastParts = parts;
   if (state.gate) await state.gate;
   if (state.nextGenerationError) {
     const error = state.nextGenerationError;
@@ -29,8 +30,9 @@ export async function putObject(key, bytes) {
 export async function getObjectBytes(key) {
   state.calls.get += 1;
   if (state.getGate) await state.getGate;
+  if (state.readError) throw state.readError;
   const bytes = state.objects.get(key);
-  if (!bytes) throw new Error("fixture object absent");
+  if (!bytes) throw Object.assign(new Error("fixture object absent"), { name: "NoSuchKey" });
   return Buffer.from(bytes);
 }
 export async function deleteObject(key) {
@@ -39,4 +41,15 @@ export async function deleteObject(key) {
 }
 export async function getPresignedUrl(key) {
   return `http://127.0.0.1/fixture/${encodeURIComponent(key)}`;
+}
+
+export class EmptyS3BodyError extends Error {}
+export const continuityImageKey = (id) => `generations/${id}/continuity.jpg`;
+export async function putContinuityObject(id, bytes) {
+  const key = continuityImageKey(id);
+  if (state.objects.has(key)) throw new Error("fixture duplicate key");
+  state.objects.set(key, Buffer.from(bytes));
+  state.calls.put++;
+  if (state.copyGate) await state.copyGate;
+  if (state.putError) throw state.putError;
 }
