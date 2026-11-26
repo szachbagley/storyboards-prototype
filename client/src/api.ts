@@ -120,7 +120,8 @@ export const api = {
   getFrame: (id: string) => request<FrameDto>(`/frames/${id}`),
   updateFrame: (id: string, body: { description?: string; conceptIds?: string[]; position?: number }) =>
     send<FrameDto>(`/frames/${id}`, "PATCH", body),
-  deleteFrame: (id: string) => send<void>(`/frames/${id}`, "DELETE"),
+  deleteFrame: (id: string, referenceSetToken?: string) =>
+    send<void>(`/frames/${id}${referenceSetToken === undefined ? "" : `?confirmContinuity=true&referenceSetToken=${encodeURIComponent(referenceSetToken)}`}`, "DELETE"),
 
   // --- generation ---
   generateFrame: (frameId: string) => send<{ generationId: string }>(`/frames/${frameId}/generate`, "POST"),

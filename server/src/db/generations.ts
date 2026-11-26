@@ -241,32 +241,20 @@ export async function sweepStale(olderThanMs: number): Promise<number> {
   return total;
 }
 
-/** Generation object keys for a frame, collected before the rows are deleted. */
-export async function imageKeysForFrame(
-  client: pg.PoolClient, frameId: string, storyId: string, userId: string,
-): Promise<string[]> {
-  const { rows } = await client.query<{ imageKey: string }>(
-    `SELECT g.image_key AS "imageKey"
+/** Inventory the generations being deleted, never those merely referencing
+ * the source. A failed or pending attempt can own an input without an output. */
+export async function deletionInventory(
+  client: pg.PoolClient, storyId: string, userId: string, frameId: string | null,
+) {
+  const { rows } = await client.query<{ id: string; outputKey: string | null; snapshot: unknown }>(
+    `SELECT g.id, g.image_key AS "outputKey",
+            CASE WHEN g.input_snapshot @> '{"schemaVersion":2}'::jsonb
+                 AND jsonb_typeof(g.input_snapshot->'continuity') = 'object'
+              THEN g.input_snapshot END AS snapshot
        FROM generations g
-       JOIN frames f   ON f.id = g.frame_id
-       JOIN stories st ON st.id = f.story_id
-      WHERE g.frame_id = $1 AND st.id = $2 AND st.user_id = $3 AND g.image_key IS NOT NULL`,
-    [frameId, storyId, userId],
-  );
-  return rows.map((row) => row.imageKey);
-}
-
-/** Same, for every frame in a story. */
-export async function imageKeysForStory(
-  client: pg.PoolClient, storyId: string, userId: string,
-): Promise<string[]> {
-  const { rows } = await client.query<{ imageKey: string }>(
-    `SELECT g.image_key AS "imageKey"
-       FROM generations g
-       JOIN frames f   ON f.id = g.frame_id
-       JOIN stories st ON st.id = f.story_id
-      WHERE f.story_id = $1 AND st.user_id = $2 AND g.image_key IS NOT NULL`,
-    [storyId, userId],
-  );
-  return rows.map((row) => row.imageKey);
+       JOIN frames f ON f.id = g.frame_id
+       JOIN stories s ON s.id = f.story_id
+      WHERE s.id = $1 AND s.user_id = $2 AND ($3::uuid IS NULL OR f.id = $3)`,
+    [storyId, userId, frameId]);
+  return rows;
 }

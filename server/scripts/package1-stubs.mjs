@@ -26,6 +26,7 @@ export const generationImageKey = (id) => `generations/${id}.jpg`;
 export async function putObject(key, bytes) {
   state.calls.put += 1;
   state.objects.set(key, Buffer.from(bytes));
+  if (state.outputGate) await state.outputGate;
 }
 export async function getObjectBytes(key) {
   state.calls.get += 1;
@@ -37,6 +38,8 @@ export async function getObjectBytes(key) {
 }
 export async function deleteObject(key) {
   state.calls.delete += 1;
+  state.attemptedDeletes?.push(key);
+  if (key === state.deleteFailureKey) throw new Error("fixture cleanup failure");
   state.objects.delete(key);
 }
 export async function getPresignedUrl(key) {

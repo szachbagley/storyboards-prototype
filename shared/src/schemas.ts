@@ -102,6 +102,14 @@ export const GenerateFrameSchema = z.object({
 });
 export type GenerateFrameBody = z.infer<typeof GenerateFrameSchema>;
 
+/** A confirmation names the exact set shown to the caller. Malformed and
+ * repeated query parameters must not fall back to an ordinary DELETE. */
+export const DeleteFrameQuerySchema = z.strictObject({
+  confirmContinuity: z.literal("true").optional(),
+  referenceSetToken: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+});
+export type DeleteFrameQuery = z.infer<typeof DeleteFrameQuerySchema>;
+
 /** POST /frames/:id/select-generation */
 export const SelectGenerationSchema = z.object({
   generationId: z.uuid(),

@@ -1,20 +1,22 @@
+import { createHash } from "node:crypto";
 import {
   appendPosition,
   type ConceptDto,
   type CreateFrameBody,
+  type DeleteFrameQuery,
   type FrameDto,
   type FrameSummaryDto,
   type UpdateFrameBody,
 } from "@storyboards/shared";
 import * as framesDb from "../db/frames.js";
-import * as generationsDb from "../db/generations.js";
+import { ownedGenerationKeys, deleteGenerationObjects } from "./generationCleanup.js";
 import type { AttachedConceptRow, FrameRow } from "../db/frames.js";
 import { withTransaction } from "../db/pool.js";
 import * as storiesDb from "../db/stories.js";
 import { generationToDto } from "./generationProjection.js";
 import { requireContinuityRollout } from "./continuityRollout.js";
 import { AppError } from "../lib/AppError.js";
-import { deleteObject, getPresignedUrl } from "./s3.js";
+import { getPresignedUrl } from "./s3.js";
 
 function frameNotFound(id: string): AppError {
   return new AppError(404, "not_found", `No frame with id ${id}`);
@@ -145,7 +147,7 @@ export async function updateFrame(id: string, userId: string, body: UpdateFrameB
   return getFrame(id, userId);
 }
 
-export async function deleteFrame(id: string, userId: string): Promise<void> {
+export async function deleteFrame(id: string, userId: string, query: DeleteFrameQuery): Promise<void> {
   const storyId = await framesDb.getOwnedFrameStoryId(id, userId);
   if (!storyId) throw frameNotFound(id);
   // Collect and delete under the same story lock as finalization. Storage work
@@ -153,25 +155,26 @@ export async function deleteFrame(id: string, userId: string): Promise<void> {
   const imageKeys = await withTransaction(async (client) => {
     if (!(await storiesDb.lockStoryForUpdate(client, storyId, userId)) ||
         !(await framesDb.lockOwnedFrameForUpdate(client, id, storyId, userId))) throw frameNotFound(id);
-    const keys = await generationsDb.imageKeysForFrame(client, id, storyId, userId);
+    const dependentIds = await framesDb.dependentFrameIds(client, id, storyId, userId);
+    const referencedByCount = dependentIds.length;
+    if (referencedByCount > 0 || query.referenceSetToken !== undefined) {
+      const referenceSetToken = createHash("sha256").update(dependentIds.join("\n")).digest("hex");
+      if (query.confirmContinuity !== "true" || query.referenceSetToken !== referenceSetToken) {
+        const consequence = referencedByCount === 0
+          ? "The source selections changed. No frames currently use this source."
+          : `This frame is a continuity source for ${referencedByCount} other ${referencedByCount === 1 ? "frame" : "frames"}. Deleting it clears those source selections.`;
+        throw new AppError(409, "continuity_source_in_use",
+          consequence + " Existing outputs and their saved continuity inputs remain with those frames." +
+          " You will need to choose another source before generating with continuity again." +
+          " Already accepted generation work may still finish or be billed.",
+          { referencedByCount, referenceSetToken });
+      }
+    }
+    const keys = await ownedGenerationKeys(client, storyId, userId, id);
+    if (referencedByCount) await framesDb.clearDependentFrames(client, id, storyId, userId);
     if (!(await framesDb.deleteFrame(client, id, userId))) throw frameNotFound(id);
     return keys;
   });
 
-  // Best effort, matching the concept-delete precedent: the rows are already
-  // gone, so a failed object delete must not fail the request. There is no
-  // orphan sweeper in this system, which is why cleanup happens inline at all.
   await deleteGenerationObjects(imageKeys);
-}
-
-async function deleteGenerationObjects(imageKeys: string[]): Promise<void> {
-  await Promise.all(
-    imageKeys.map(async (key) => {
-      try {
-        await deleteObject(key);
-      } catch (err) {
-        console.error(`[frames] failed to delete generation object ${key}`, err);
-      }
-    }),
-  );
 }

@@ -10,12 +10,14 @@ import { useState } from "react";
 export function ConfirmButton({
   label,
   confirmLabel,
+  message,
   onConfirm,
   busy = false,
   className = "btn btn-danger",
 }: {
   label: string;
   confirmLabel: string;
+  message?: string;
   onConfirm: () => void;
   busy?: boolean;
   className?: string;
@@ -31,13 +33,16 @@ export function ConfirmButton({
   }
 
   return (
-    <span className="row">
-      <button type="button" className="btn btn-danger" disabled={busy} onClick={onConfirm}>
-        {busy ? "Working…" : confirmLabel}
-      </button>
-      <button type="button" className="btn" disabled={busy} onClick={() => setArmed(false)}>
-        Cancel
-      </button>
+    <span>
+      {message && <span>{message} </span>}
+      <span className="row">
+        <button type="button" className="btn btn-danger" disabled={busy} onClick={onConfirm}>
+          {busy ? "Working…" : confirmLabel}
+        </button>
+        <button type="button" className="btn" disabled={busy} onClick={() => setArmed(false)}>
+          Cancel
+        </button>
+      </span>
     </span>
   );
 }

@@ -420,7 +420,7 @@ try {
   if (continuityEnabled) {
     const { verifyContinuity } = await import("./verify-continuity-cases.mjs");
     await verifyContinuity({ db, state, request, a, b, storyA, other, gate, waitFor, status,
-      injectAdmissionFault: (fault) => { commitFault = fault; } });
+      injectCommitFault: (fault) => { commitFault = fault; } });
   }
   assert.equal(globalThis.__package1Outbound.blocked, 0);
   console.log(`offline app: stub dispatches generate=${state.calls.generate}, validate=${state.calls.validate}, describe=${state.calls.describe}; real outbound=0`);
