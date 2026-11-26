@@ -113,7 +113,8 @@ pg.Client.prototype.query = function (...args) {
   }
   return originalPgQuery.apply(this, args);
 };
-const server = createApp().listen(0, "127.0.0.1");
+const continuityEnabled = process.argv.includes("--continuity");
+const server = createApp({ continuityEnabled }).listen(0, "127.0.0.1");
 await new Promise((resolve) => server.once("listening", resolve));
 const base = `http://127.0.0.1:${server.address().port}/api`;
 const request = async (method, path, token, body, expected) => {
@@ -191,6 +192,7 @@ try {
   assert.equal(state.calls.generate, 1);
   const detail = await request("GET", `/frames/${frame.id}`, a.token, undefined, 200);
   const poll = await request("GET", `/generations/${started.generationId}`, a.token, undefined, 200);
+  assert.deepEqual(poll.continuity, { provenance: "known", source: null });
   for (const dto of [detail, poll]) {
     const serialized = JSON.stringify(dto);
     assert.equal(serialized.includes("inputSnapshot"), false);
@@ -299,7 +301,7 @@ try {
   const source = await request("POST", `/stories/${storyA.id}/frames`, a.token,
     { description: "source" }, 201);
   await request("PATCH", `/frames/${frame.id}`, a.token,
-    { continuitySourceFrameId: source.id }, 422);
+    { continuitySourceFrameId: source.id }, continuityEnabled ? 200 : 422);
   await db.query("UPDATE frames SET continuity_source_frame_id = $1 WHERE id = $2",
     [source.id, frame.id]);
   const priorCalls = state.calls.generate;
@@ -313,7 +315,7 @@ try {
   const tied = (await request("GET", `/stories/${storyA.id}/frames`, a.token, undefined, 200))
     .filter((item) => item.position === 500).map((item) => item.id);
   assert.deepEqual(tied, [frame.id, source.id].sort());
-  console.log("offline app: partial rollout refuses source configuration and dispatch");
+  console.log("offline app: source configuration gate and unusable source rejection passed");
 
   const invalid = new Error("fixture rejected");
   invalid.status = 401;
@@ -407,6 +409,11 @@ try {
   assert.equal(state.objects.has(storedKey), false);
   console.log("offline app: story deletion collected committed output under the story lock");
 
+  if (continuityEnabled) {
+    const { verifyContinuity } = await import("./verify-continuity-cases.mjs");
+    await verifyContinuity({ db, state, request, a, b, storyA, other, gate, waitFor, status,
+      loseCommitAck: () => { commitFault = "after"; } });
+  }
   assert.equal(globalThis.__package1Outbound.blocked, 0);
   console.log(`offline app: stub dispatches generate=${state.calls.generate}, validate=${state.calls.validate}, describe=${state.calls.describe}; real outbound=0`);
 } finally {

@@ -412,6 +412,33 @@ the integrated continuity feature is released.
 
 ---
 
+### Explicit source admission (Package 4 rollout)
+
+An owned frame may reference another frame in its story, including a later
+frame. PATCH omission preserves the choice and null clears it. The server
+captures the source selection, destination scene and ordered concept metadata
+in one read. After the capture, a different source selection or edit applies to
+the next attempt. An expected source UUID (or explicit null) that differs at
+capture returns 409 before storage access. A request token already accepted
+for the same owned frame returns its original generation, including a terminal
+one. GET `/frames/:id/generation-requests/:requestId` looks it up without
+starting work. Compare the current source and its selected generation IDs with
+known historical provenance to detect a changed reference.
+
+After reference preflight, admission locks story then destination and inserts
+the pending row before dispatch. Different tokens can admit again once the
+first attempt completes. A bodyless POST lacks durable replay identity.
+Crashing after commit can leave an abandoned row. A lost commit acknowledgement
+preserves the private copy without dispatch, so there is no exactly-once billing
+guarantee. An ambiguous copy PUT or failed cleanup can leave a private orphan.
+
+The approved retention rule covers every accepted attempt, including failures.
+Keep its private input after source deletion, until its destination frame or
+story is deleted. The normal application keeps source configuration and new
+source-backed admission closed while destination cleanup (#12) is outstanding.
+The disposable HTTP fixture explicitly exercises the integrated path. Confirm
+bucket lifecycle compatibility and destination cleanup before opening ingress.
+
 ## 10. Authentication
 
 Accounts with username and password. Sessions are opaque bearer tokens.

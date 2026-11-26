@@ -13,6 +13,7 @@ export interface GenerationDetailRow {
   errorMessage: string | null;
   createdAt: Date;
   completedAt: Date | null;
+  inputSnapshot: unknown;
 }
 
 // Ownership runs generation -> frame -> story -> user. Reads and user-initiated
@@ -22,7 +23,7 @@ export interface GenerationDetailRow {
 export async function getGenerationById(
   id: string, userId: string, client?: pg.PoolClient,
 ): Promise<GenerationDetailRow | null> {
-  const sql = `SELECT g.id,
+  const sql = `SELECT g.id, g.input_snapshot AS "inputSnapshot",
             g.frame_id      AS "frameId",
             g.status,
             g.image_key     AS "imageKey",

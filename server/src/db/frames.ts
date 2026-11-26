@@ -8,6 +8,10 @@ export interface FrameRow {
   position: number;
   description: string;
   selectedGenerationId: string | null;
+  continuitySourceFrameId: string | null;
+  continuitySourceSelectedGenerationId: string | null;
+  continuityReferencedByCount: number;
+  selectedImageState: "none" | "pending" | "failed" | "invalid" | "ready";
   selectedImageKey: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -26,6 +30,8 @@ export interface AttachedConceptRow {
 }
 
 export interface GenerationRow {
+  frameId: string;
+  inputSnapshot: unknown;
   id: string;
   status: GenerationStatus;
   imageKey: string | null;
@@ -39,6 +45,8 @@ export interface CapturedGenerationInputs {
   storyId: string;
   frameDescription: string;
   continuitySourceFrameId: string | null;
+  sourceId: string | null;
+  source: { frameId: string; generationId: string; imageKey: string; position: number } | null;
   capturedAt: Date;
   concepts: Array<Pick<AttachedConceptRow,
     "id" | "ord" | "name" | "type" | "description" | "imageKey" | "imageMime">>;
@@ -52,13 +60,22 @@ const SELECT_FRAMES = `
          f.story_id AS "storyId",
          f.position,
          f.description,
-         f.selected_generation_id AS "selectedGenerationId",
-         g.image_key AS "selectedImageKey",
+         g.id AS "selectedGenerationId",
+         CASE WHEN g.status = 'succeeded' THEN g.image_key END AS "selectedImageKey",
+         src.id AS "continuitySourceFrameId", sg.id AS "continuitySourceSelectedGenerationId",
+         (SELECT count(*)::int FROM frames incoming WHERE incoming.story_id = f.story_id
+           AND incoming.continuity_source_frame_id = f.id) AS "continuityReferencedByCount",
+         CASE WHEN f.selected_generation_id IS NULL THEN 'none'
+              WHEN g.status IN ('pending','failed') THEN g.status::text
+              WHEN g.status = 'succeeded' AND g.image_key IS NOT NULL THEN 'ready'
+              ELSE 'invalid' END AS "selectedImageState",
          f.created_at AS "createdAt",
          f.updated_at AS "updatedAt"
   FROM frames f
   JOIN stories st ON st.id = f.story_id
-  LEFT JOIN generations g ON g.id = f.selected_generation_id
+  LEFT JOIN generations g ON g.id = f.selected_generation_id AND g.frame_id = f.id
+  LEFT JOIN frames src ON src.id = f.continuity_source_frame_id AND src.story_id = f.story_id AND src.id <> f.id
+  LEFT JOIN generations sg ON sg.id = src.selected_generation_id AND sg.frame_id = src.id
 `;
 
 export async function listFramesByStory(storyId: string, userId: string): Promise<FrameRow[]> {
@@ -84,6 +101,10 @@ export async function captureGenerationInputs(
     `SELECT f.story_id AS "storyId",
             f.description AS "frameDescription",
             f.continuity_source_frame_id AS "continuitySourceFrameId",
+            src.id AS "sourceId",
+            CASE WHEN sg.id IS NOT NULL THEN jsonb_build_object(
+              'frameId', src.id, 'generationId', sg.id, 'imageKey', sg.image_key,
+              'position', src.position) END AS source,
             statement_timestamp() AS "capturedAt",
             COALESCE((
               SELECT jsonb_agg(jsonb_build_object(
@@ -97,6 +118,8 @@ export async function captureGenerationInputs(
             ), '[]'::jsonb) AS concepts
        FROM frames f
        JOIN stories st ON st.id = f.story_id
+       LEFT JOIN frames src ON src.id = f.continuity_source_frame_id AND src.story_id = f.story_id AND src.id <> f.id
+       LEFT JOIN generations sg ON sg.id = src.selected_generation_id AND sg.frame_id = src.id AND sg.status = 'succeeded' AND sg.image_key IS NOT NULL
       WHERE f.id = $1 AND st.user_id = $2`,
     [frameId, userId],
   );
@@ -137,7 +160,7 @@ export async function listFrameConcepts(frameId: string, userId: string): Promis
 /** Generation history, newest first (TECH_SPEC.md section 12.4). */
 export async function listFrameGenerations(frameId: string, userId: string): Promise<GenerationRow[]> {
   const { rows } = await query<GenerationRow>(
-    `SELECT g.id,
+    `SELECT g.id, g.frame_id AS "frameId", g.input_snapshot AS "inputSnapshot",
             g.status,
             g.image_key     AS "imageKey",
             g.error_code    AS "errorCode",
@@ -177,6 +200,21 @@ export async function lockOwnedFrameForUpdate(
      WHERE f.id = $1 AND f.story_id = $2 AND st.user_id = $3 FOR UPDATE OF f`,
     [id, storyId, userId],
   );
+  return rowCount === 1;
+}
+
+export async function lockOwnedSource(client: pg.PoolClient, sourceId: string, storyId: string, userId: string) {
+  const { rowCount } = await client.query(
+    `SELECT f.id FROM frames f JOIN stories s ON s.id = f.story_id
+     WHERE f.id = $1 AND s.id = $2 AND s.user_id = $3 FOR KEY SHARE OF f`, [sourceId, storyId, userId]);
+  return rowCount === 1;
+}
+
+export async function sourceStillExists(targetId: string, sourceId: string, userId: string) {
+  const { rowCount } = await query(
+    `SELECT src.id FROM frames f JOIN stories s ON s.id = f.story_id
+     JOIN frames src ON src.story_id = s.id WHERE f.id = $1 AND src.id = $2 AND s.user_id = $3`,
+    [targetId, sourceId, userId]);
   return rowCount === 1;
 }
 
